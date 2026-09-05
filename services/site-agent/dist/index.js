@@ -1,9 +1,7 @@
 import express from 'express';
 import helmet from 'helmet';
 import { errorHandler, internalKeyGuard, requestLogger, sanitizeBody, } from '@hc/shared';
-import { retryWithBackoff } from '@hc/shared';
-import { SiteCache } from './cache.js';
-import { EpochGatedEvaluator } from './evaluator.js';
+import { retryWithBackoff, SiteCache, EpochGatedEvaluator } from '@hc/shared';
 const SITE_ID = process.env.SITE_ID ?? 'site-a';
 const PORT = Number(process.env.PORT ?? 4101);
 const COORDINATOR_URL = process.env.COORDINATOR_URL ?? 'http://localhost:4002';
@@ -64,14 +62,14 @@ app.post('/internal/push', (req, res) => {
 // orderEpoch is the barrier-read epoch stamped at submission — all sites
 // evaluate this order at exactly that epoch.
 app.post('/internal/evaluate', (req, res) => {
-    const { order, orderEpoch } = req.body ?? {};
+    const { order, orderEpoch, siteId } = req.body ?? {};
     if (!order?.orderCode || !Array.isArray(order?.details?.drugs)) {
         res.status(400).json({ error: 'order.orderCode and order.details.drugs[] required' });
         return;
     }
     const clinicalOrder = {
         orderId: String(order.orderId ?? `ord-${Date.now()}`),
-        siteId: SITE_ID,
+        siteId: typeof siteId === 'string' && siteId ? siteId : SITE_ID,
         orderCode: String(order.orderCode),
         patientRef: String(order.patientRef ?? 'patient-unknown'),
         submittedAt: new Date().toISOString(),

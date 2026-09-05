@@ -1,10 +1,10 @@
-import type { AlertResult, ClinicalOrder } from '@hc/shared';
+import type { AlertResult, ClinicalOrder } from './types.js';
 import {
   DrugInteractionEngine,
   mostConservative,
   resultsEqual,
   type RuleEngine,
-} from '@hc/shared';
+} from './engine.js';
 import type { SiteCache } from './cache.js';
 
 /**

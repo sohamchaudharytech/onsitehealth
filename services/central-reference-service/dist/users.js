@@ -11,7 +11,13 @@ export class UserStore {
     refreshTokens = new Map(); // key = tokenHash
     constructor(seed) {
         for (const u of seed) {
-            const rec = { userId: u.userId, username: u.username, passwordHash: hashPassword(u.password), role: u.role };
+            const rec = {
+                userId: u.userId,
+                username: u.username,
+                passwordHash: hashPassword(u.password),
+                role: u.role,
+                ...(u.role === 'doctor' ? { hospitalId: u.hospitalId, fullName: u.fullName } : {}),
+            };
             this.users.set(u.userId, rec);
             this.byUsername.set(u.username, u.userId);
         }
@@ -29,14 +35,46 @@ export class UserStore {
         return this.users.get(userId) ?? null;
     }
     list() {
-        return [...this.users.values()].map(({ userId, username, role }) => ({ userId, username, role }));
+        return [...this.users.values()].map(({ userId, username, role, hospitalId, fullName }) => ({ userId, username, role, hospitalId, fullName }));
     }
-    create(username, password, role) {
+    /** Doctors only — with resolved hospital names for display. */
+    listDoctors() {
+        return this.list().filter((u) => u.role === 'doctor');
+    }
+    /** Delete a user (admin only). Returns the removed record, or null if absent. */
+    deleteUser(userId) {
+        const rec = this.users.get(userId);
+        if (!rec)
+            return null;
+        this.users.delete(userId);
+        this.byUsername.delete(rec.username);
+        this.revokeAllForUser(userId);
+        return { userId: rec.userId, username: rec.username, role: rec.role };
+    }
+    /** True if any doctor is affiliated with the given hospital. */
+    hasDoctorAtHospital(hospitalId) {
+        for (const u of this.users.values()) {
+            if (u.role === 'doctor' && u.hospitalId === hospitalId)
+                return true;
+        }
+        return false;
+    }
+    create(username, password, role, hospitalId, fullName) {
         const userId = `user-${newOpaqueToken().slice(0, 12)}`;
-        const rec = { userId, username, passwordHash: hashPassword(password), role };
+        const rec = {
+            userId,
+            username,
+            passwordHash: hashPassword(password),
+            role,
+            ...(role === 'doctor' ? { hospitalId, fullName } : {}),
+        };
         this.users.set(userId, rec);
         this.byUsername.set(username, userId);
         return rec;
+    }
+    /** Unique-username check (UserStore.create is otherwise silent on collision). */
+    usernameTaken(username) {
+        return this.byUsername.has(username);
     }
     // ── Refresh tokens ────────────────────────────────────────────────────────
     issueRefreshToken(userId) {

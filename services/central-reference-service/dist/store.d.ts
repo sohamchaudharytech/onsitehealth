@@ -4,6 +4,14 @@ export interface SiteRecord extends SiteNetworkProfile {
     host: string;
     port: number;
 }
+/** Human domain attributes of a hospital (site = clinical system). */
+export interface HospitalRecord {
+    siteId: string;
+    name: string;
+    region: string;
+    simulated: boolean;
+    createdAt: string;
+}
 /**
  * In-memory store for the central service (Phase 0-4 scope: minimal store;
  * MongoDB persistence is Phase 7 per PRD §13). Single-process authoritative
@@ -15,12 +23,26 @@ export declare class CentralStore {
     private bySeq;
     private nextGlobalSeq;
     private sites;
+    private hospitals;
+    /** sim-N slot allocation (siteId -> N) so successive sim batches never collide */
+    private nextSimNumber;
     publish(ruleId: string, payload: Record<string, unknown>): ReferenceRuleVersion;
     setHash(rec: ReferenceRuleVersion, contentHash: string): void;
     allVersions(ruleId: string): ReferenceRuleVersion[];
     allRules(): ReferenceRuleVersion[];
     latestSeq(): number;
     registerSite(profile: SiteRecord): void;
+    unregisterSite(siteId: string): SiteRecord | null;
+    registerHospital(rec: HospitalRecord): void;
+    getHospital(siteId: string): HospitalRecord | null;
+    listHospitals(): HospitalRecord[];
+    /**
+     * Allocate `sim-N` ids for a batch of simulated hospitals. Deterministic
+     * next-slot: resumes from the highest previously used N, so successive
+     * batches get sim-4..sim-6, sim-7..sim-9, etc. without collisions (skips
+     * any id that already exists as a site).
+     */
+    allocateSimSiteIds(count: number): string[];
     updateSiteNetwork(siteId: string, patch: Partial<SiteNetworkProfile>): SiteRecord | null;
     getSite(siteId: string): SiteRecord | null;
     listSites(): SiteRecord[];

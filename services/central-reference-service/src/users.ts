@@ -5,6 +5,10 @@ export interface UserRecord {
   username: string;
   passwordHash: string;
   role: Role;
+  /** doctors only: hospital this doctor is affiliated with */
+  hospitalId?: string;
+  /** doctors only: display name */
+  fullName?: string;
 }
 
 export interface RefreshRecord {
@@ -25,9 +29,15 @@ export class UserStore {
   private byUsername = new Map<string, string>();
   private refreshTokens = new Map<string, RefreshRecord>(); // key = tokenHash
 
-  constructor(seed: Array<{ userId: string; username: string; password: string; role: Role }>) {
+  constructor(seed: Array<{ userId: string; username: string; password: string; role: Role; hospitalId?: string; fullName?: string }>) {
     for (const u of seed) {
-      const rec: UserRecord = { userId: u.userId, username: u.username, passwordHash: hashPassword(u.password), role: u.role };
+      const rec: UserRecord = {
+        userId: u.userId,
+        username: u.username,
+        passwordHash: hashPassword(u.password),
+        role: u.role,
+        ...(u.role === 'doctor' ? { hospitalId: u.hospitalId, fullName: u.fullName } : {}),
+      };
       this.users.set(u.userId, rec);
       this.byUsername.set(u.username, u.userId);
     }
@@ -45,16 +55,50 @@ export class UserStore {
     return this.users.get(userId) ?? null;
   }
 
-  list(): Array<{ userId: string; username: string; role: Role }> {
-    return [...this.users.values()].map(({ userId, username, role }) => ({ userId, username, role }));
+  list(): Array<{ userId: string; username: string; role: Role; hospitalId?: string; fullName?: string }> {
+    return [...this.users.values()].map(({ userId, username, role, hospitalId, fullName }) => ({ userId, username, role, hospitalId, fullName }));
   }
 
-  create(username: string, password: string, role: Role): UserRecord {
+  /** Doctors only — with resolved hospital names for display. */
+  listDoctors(): Array<{ userId: string; username: string; hospitalId?: string; fullName?: string }> {
+    return this.list().filter((u) => u.role === 'doctor');
+  }
+
+  /** Delete a user (admin only). Returns the removed record, or null if absent. */
+  deleteUser(userId: string): { userId: string; username: string; role: Role } | null {
+    const rec = this.users.get(userId);
+    if (!rec) return null;
+    this.users.delete(userId);
+    this.byUsername.delete(rec.username);
+    this.revokeAllForUser(userId);
+    return { userId: rec.userId, username: rec.username, role: rec.role };
+  }
+
+  /** True if any doctor is affiliated with the given hospital. */
+  hasDoctorAtHospital(hospitalId: string): boolean {
+    for (const u of this.users.values()) {
+      if (u.role === 'doctor' && u.hospitalId === hospitalId) return true;
+    }
+    return false;
+  }
+
+  create(username: string, password: string, role: Role, hospitalId?: string, fullName?: string): UserRecord {
     const userId = `user-${newOpaqueToken().slice(0, 12)}`;
-    const rec: UserRecord = { userId, username, passwordHash: hashPassword(password), role };
+    const rec: UserRecord = {
+      userId,
+      username,
+      passwordHash: hashPassword(password),
+      role,
+      ...(role === 'doctor' ? { hospitalId, fullName } : {}),
+    };
     this.users.set(userId, rec);
     this.byUsername.set(username, userId);
     return rec;
+  }
+
+  /** Unique-username check (UserStore.create is otherwise silent on collision). */
+  usernameTaken(username: string): boolean {
+    return this.byUsername.has(username);
   }
 
   // ── Refresh tokens ────────────────────────────────────────────────────────

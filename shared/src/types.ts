@@ -70,7 +70,12 @@ export type LedgerEventType =
   | 'EPOCH_ADVANCED'
   | 'ORDER_EVALUATED'
   | 'SITE_CHAOS_INJECTED'
-  | 'SITE_UNREACHABLE';
+  | 'SITE_UNREACHABLE'
+  | 'HOSPITAL_ADDED'
+  | 'HOSPITAL_REMOVED'
+  | 'SIM_HOSPITALS_GENERATED'
+  | 'DOCTOR_ADDED'
+  | 'USER_REMOVED';
 
 export interface AuditBlock {
   index: number;
@@ -121,7 +126,9 @@ export interface LiveEvent {
     | 'PUBLISH'
     | 'RETRY'
     | 'UNREACHABLE'
-    | 'LEDGER';
+    | 'LEDGER'
+    | 'HOSPITAL'
+    | 'DOCTOR';
   data: Record<string, unknown>;
   ts: string;
 }

@@ -4,6 +4,10 @@ export interface UserRecord {
     username: string;
     passwordHash: string;
     role: Role;
+    /** doctors only: hospital this doctor is affiliated with */
+    hospitalId?: string;
+    /** doctors only: display name */
+    fullName?: string;
 }
 export interface RefreshRecord {
     userId: string;
@@ -26,6 +30,8 @@ export declare class UserStore {
         username: string;
         password: string;
         role: Role;
+        hospitalId?: string;
+        fullName?: string;
     }>);
     authenticate(username: string, password: string): UserRecord | null;
     get(userId: string): UserRecord | null;
@@ -33,8 +39,27 @@ export declare class UserStore {
         userId: string;
         username: string;
         role: Role;
+        hospitalId?: string;
+        fullName?: string;
     }>;
-    create(username: string, password: string, role: Role): UserRecord;
+    /** Doctors only — with resolved hospital names for display. */
+    listDoctors(): Array<{
+        userId: string;
+        username: string;
+        hospitalId?: string;
+        fullName?: string;
+    }>;
+    /** Delete a user (admin only). Returns the removed record, or null if absent. */
+    deleteUser(userId: string): {
+        userId: string;
+        username: string;
+        role: Role;
+    } | null;
+    /** True if any doctor is affiliated with the given hospital. */
+    hasDoctorAtHospital(hospitalId: string): boolean;
+    create(username: string, password: string, role: Role, hospitalId?: string, fullName?: string): UserRecord;
+    /** Unique-username check (UserStore.create is otherwise silent on collision). */
+    usernameTaken(username: string): boolean;
     issueRefreshToken(userId: string): string;
     /**
      * Rotate: consume a refresh token, return the userId it belongs to.

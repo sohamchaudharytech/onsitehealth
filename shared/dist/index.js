@@ -3,6 +3,8 @@ export * from './hash.js';
 export * from './ledger.js';
 export * from './backoff.js';
 export * from './engine.js';
+export * from './cache.js';
+export * from './evaluator.js';
 export * from './net.js';
 export * from './auth.js';
 export * from './rbac.js';

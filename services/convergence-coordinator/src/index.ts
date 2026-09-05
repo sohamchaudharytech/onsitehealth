@@ -83,6 +83,20 @@ app.get('/internal/epoch', internalKeyGuard(INTERNAL_KEY), (_req, res) => {
   res.json(state.getEpoch());
 });
 
+// A hospital was removed — drop its watermark so a dead site stops gating
+// the global epoch forever (min-watermark would otherwise freeze at its
+// last ACK). Requested by the central service (admin hospital delete).
+app.post('/internal/sites/remove', internalKeyGuard(INTERNAL_KEY), (req, res) => {
+  const { siteId } = req.body ?? {};
+  if (typeof siteId !== 'string' || !siteId.trim()) {
+    res.status(400).json({ error: 'siteId required' });
+    return;
+  }
+  state.removeSite(siteId);
+  broadcast({ type: 'WATERMARK', data: { siteId, watermarkSeq: -1, removed: true }, ts: new Date().toISOString() });
+  res.json({ ok: true });
+});
+
 // Public API: requires a valid JWT (dashboard users). Read-only state.
 app.use(jwtAuth(JWT_SECRET));
 

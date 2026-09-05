@@ -11,6 +11,8 @@
     "./ledger": "./dist/ledger.js",
     "./backoff": "./dist/backoff.js",
     "./engine": "./dist/engine.js",
+    "./cache": "./dist/cache.js",
+    "./evaluator": "./dist/evaluator.js",
     "./net": "./dist/net.js",
     "./auth": "./dist/auth.js",
     "./rbac": "./dist/rbac.js",

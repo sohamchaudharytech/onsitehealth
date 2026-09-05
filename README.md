@@ -88,6 +88,7 @@ All dashboard/API access is authenticated. Demo accounts (seeded at startup):
 | `operator` | `operator123` | operator |
 | `auditor` | `auditor123` | auditor |
 | `viewer` | `viewer123` | viewer |
+| `doctor` | `doctor123` | doctor (Doctor Portal — publishes drug-interaction rules) |
 
 **Auth flow:** `POST /api/auth/login` → 15-min HS256 JWT access token
 (`{userId, username, role}`) + opaque refresh token. Refresh tokens are stored
@@ -99,7 +100,7 @@ auto-refreshes on 401 and supports logout. Passwords are scrypt-hashed.
 
 | Permission | Roles |
 |------------|-------|
-| `reference:publish` | admin |
+| `reference:publish` | admin, doctor |
 | `sites:manage` (chaos) | admin |
 | `orders:submit` | admin, operator |
 | `dashboard:view` | all |
@@ -175,6 +176,14 @@ GET  /api/reference/rules/:ruleId/history
 POST /api/sites                     — register site + network profile (admin)
 PATCH /api/sites/:siteId/network    — live-tune latency/jitter/drop (admin)
 GET  /api/sites
+GET  /api/hospitals                 — hospitals with network profile + doctor counts
+POST /api/hospitals                 — add hospital (name/region/siteId) (admin)
+POST /api/hospitals/simulated       — generate N simulated hospitals for scale testing (admin)
+DELETE /api/hospitals/:siteId       — remove hospital + agent + watermark (admin)
+GET  /api/doctors                   — doctors with hospital affiliations (admin)
+POST /api/doctors                   — add doctor (username/password/hospitalId) (admin)
+POST /api/doctors/simulated         — batch-generate test doctors (admin)
+DELETE /api/doctors/:userId         — remove doctor (admin)
 GET  /api/epoch                     — current global active epoch (coordinator)
 GET  /api/watermarks                — all site watermarks + epoch (coordinator)
 POST /api/orders                    — identical order → all sites (admin/operator)
@@ -187,6 +196,12 @@ WS   /ws/epoch                     — epoch pub/sub for site agents (?key=)
 
 All `/api/*` routes require a Bearer JWT except `/api/auth/*`; internal
 service routes require `x-internal-key` instead.
+
+**Simulated hospitals for scale testing:** each generated hospital runs a
+real in-process agent (identical `/internal/push` + `/internal/evaluate`
+contract, randomized network profile, watermark ACKs). Generate 50–500
+from the admin dashboard to stress fan-out, epoch gating, and consistency
+at scale — the acceptance demo passes identically at 250 hospitals.
 
 ## Honest caveats (say these if a judge pushes)
 

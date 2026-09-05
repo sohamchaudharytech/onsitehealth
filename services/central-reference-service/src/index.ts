@@ -14,13 +14,25 @@ import {
   errorHandler,
   signJwt,
   verifyJwt,
+  EpochGatedEvaluator,
+  SiteCache,
   type AlertResult,
+  type ClinicalOrder,
   type LiveEvent,
   type ReferenceRuleVersion,
 } from '@hc/shared';
 import { CentralStore, type SiteRecord } from './store.js';
 import { pushToSite } from './pusher.js';
 import { UserStore } from './users.js';
+import {
+  generateHospitalName,
+  generateRegion,
+  generateDoctorName,
+  generateDoctorPassword,
+  simPortFor,
+  startSimSite,
+  type SimSite,
+} from './simulate.js';
 
 const PORT = Number(process.env.PORT ?? 4001);
 const SITE_HOSTS = (process.env.SITE_HOSTS ?? 'localhost:4101,localhost:4102,localhost:4103')
@@ -38,12 +50,28 @@ const ACCESS_TOKEN_TTL_SEC = 15 * 60; // short-lived (PRD §7.4)
 const store = new CentralStore();
 const ledger = new HashChainLedger();
 
+// ── Small helpers ────────────────────────────────────────────────────────────
+function clampNum(input: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(input);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function slugify(name: string): string {
+  return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || `hospital-${Date.now()}`;
+}
+
+function pickNetwork(s: SiteRecord): { baseLatencyMs: number; jitterMs: number; dropRate: number } {
+  return { baseLatencyMs: s.baseLatencyMs, jitterMs: s.jitterMs, dropRate: s.dropRate };
+}
+
 // Demo users — one per RBAC role so every permission row is demonstrable.
 const users = new UserStore([
   { userId: 'user-admin', username: 'admin', password: 'admin123', role: 'admin' },
   { userId: 'user-operator', username: 'operator', password: 'operator123', role: 'operator' },
   { userId: 'user-auditor', username: 'auditor', password: 'auditor123', role: 'auditor' },
   { userId: 'user-viewer', username: 'viewer', password: 'viewer123', role: 'viewer' },
+  { userId: 'user-doctor', username: 'doctor', password: 'doctor123', role: 'doctor', hospitalId: 'site-a', fullName: 'Dr. Demo Physician' },
 ]);
 
 // ── Live event fan-out (dashboard WebSocket clients) ─────────────────────────
@@ -82,6 +110,98 @@ for (const [i, p] of DEFAULT_PROFILES.entries()) {
   store.registerSite({ ...p, host: h, port: Number(port) });
 }
 
+// Default hospitals match the seeded demo sites so the dashboard has real
+// records to show from the start.
+const seededHospitalNames = ['Central General Hospital', 'Northside Medical Center', 'Riverside Clinic'];
+for (const [i, p] of DEFAULT_PROFILES.entries()) {
+  store.registerHospital({
+    siteId: p.siteId,
+    name: seededHospitalNames[i] ?? p.siteId,
+    region: generateRegion(i),
+    simulated: false,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+// ── Simulated hospital agents (in-process, for scalability testing) ──────────
+// Each sim hospital gets a real HTTP server inside this process with the
+// same /internal/push + /internal/evaluate contract as a site-agent, so
+// fan-out, watermark ACKs, and epoch gating treat it identically.
+const simSites = new Map<string, SimSite>();
+const simCaches = new Map<string, SiteCache>();
+const simEvaluators = new Map<string, EpochGatedEvaluator>();
+const simResults = new Map<string, Map<string, AlertResult[]>>();
+let nextSimPortOffset = 0;
+
+async function hostSimulatedHospital(siteId: string): Promise<SimSite> {
+  const existing = simSites.get(siteId);
+  if (existing) return existing;
+  const cache = new SiteCache();
+  const evaluator = new EpochGatedEvaluator();
+  simCaches.set(siteId, cache);
+  simEvaluators.set(siteId, evaluator);
+  simResults.set(siteId, new Map());
+  const port = simPortFor(nextSimPortOffset++);
+  const sim = await startSimSite(siteId, port, {
+    push: (ruleVersion) => simCaches.get(siteId)!.ingest(ruleVersion as unknown as ReferenceRuleVersion),
+    evaluate: (order, orderEpoch) => {
+      const cache = simCaches.get(siteId)!;
+      const evaluator = simEvaluators.get(siteId)!;
+      const clinicalOrder: ClinicalOrder = {
+        orderId: String(order.orderId ?? `ord-${Date.now()}`),
+        siteId,
+        orderCode: String(order.orderCode),
+        patientRef: String(order.patientRef ?? 'patient-unknown'),
+        submittedAt: new Date().toISOString(),
+        details: order.details as Record<string, unknown>,
+      };
+      const result = evaluator.evaluate(clinicalOrder, cache, orderEpoch);
+      const byOrder = simResults.get(siteId)!;
+      const list = byOrder.get(clinicalOrder.orderId) ?? [];
+      list.push(result);
+      byOrder.set(clinicalOrder.orderId, list);
+      broadcast({ type: 'ALERT_RESULT', data: { ...result }, ts: new Date().toISOString() });
+      return result;
+    },
+  });
+  simSites.set(siteId, sim);
+
+  // Initial watermark ACK so the coordinator counts the sim site from the
+  // start (epoch = min over known sites; watermark 0 is a valid floor).
+  void fetch(`${COORDINATOR_URL}/internal/ack`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-internal-key': INTERNAL_KEY },
+    body: JSON.stringify({ siteId, watermarkSeq: 0 }),
+    signal: AbortSignal.timeout(2000),
+  }).catch(() => undefined);
+  return sim;
+}
+
+async function teardownSimulatedHospital(siteId: string): Promise<void> {
+  const sim = simSites.get(siteId);
+  if (sim) {
+    await new Promise<void>((resolve) => sim.handle.close(() => resolve()));
+    simSites.delete(siteId);
+  }
+  simCaches.delete(siteId);
+  simEvaluators.delete(siteId);
+  simResults.delete(siteId);
+}
+
+/** Replay all published rule versions into a newly attached hospital so it can evaluate. */
+async function replayHistoryToSite(site: SiteRecord): Promise<void> {
+  const rules = store.allRules();
+  await Promise.all(
+    rules.map((rec) =>
+      pushToSite({ store, ledger, broadcast }, site, rec).then((outcome) => {
+        if (outcome.delivered) {
+          ledger.append('REFDATA_RECEIVED', { siteId: site.siteId, ruleId: rec.ruleId, globalSeq: rec.globalSeq, attempts: outcome.attempts, replay: true });
+        }
+      }),
+    ),
+  );
+}
+
 // ── Middleware pipeline (PRD §7.7, fixed order) ───────────────────────────────
 // helmet → cors → json body-parser (size-capped) → request-id/logger
 //   → rate limiter → sanitize → [JWT auth → RBAC per route] → handler
@@ -115,7 +235,14 @@ app.post('/api/auth/login', (req, res) => {
     ACCESS_TOKEN_TTL_SEC,
   );
   const refreshToken = users.issueRefreshToken(user.userId);
-  res.json({ accessToken, refreshToken, expiresInSec: ACCESS_TOKEN_TTL_SEC, role: user.role, username: user.username });
+  res.json({
+    accessToken,
+    refreshToken,
+    expiresInSec: ACCESS_TOKEN_TTL_SEC,
+    role: user.role,
+    username: user.username,
+    ...(user.role === 'doctor' ? { hospitalId: user.hospitalId ?? null } : {}),
+  });
 });
 
 app.post('/api/auth/refresh', (req, res) => {
@@ -243,6 +370,209 @@ app.get('/api/sites', (_req, res) => {
   res.json(store.listSites());
 });
 
+// ── Hospitals (admin) ────────────────────────────────────────────────────────
+// A hospital = domain record (name/region) + a site registration (network
+// profile + agent location). GET /api/hospitals joins both for the dashboard.
+
+app.get('/api/hospitals', (_req, res) => {
+  const sites = new Map(store.listSites().map((s) => [s.siteId, s]));
+  const doctorCountByHospital = new Map<string, number>();
+  for (const d of users.listDoctors()) {
+    if (d.hospitalId) doctorCountByHospital.set(d.hospitalId, (doctorCountByHospital.get(d.hospitalId) ?? 0) + 1);
+  }
+  res.json(store.listHospitals().map((h) => {
+    const site = sites.get(h.siteId);
+    return {
+      ...h,
+      baseLatencyMs: site?.baseLatencyMs ?? 0,
+      jitterMs: site?.jitterMs ?? 0,
+      dropRate: site?.dropRate ?? 0,
+      doctorCount: doctorCountByHospital.get(h.siteId) ?? 0,
+    };
+  }));
+});
+
+app.post('/api/hospitals', requirePermission('hospitals:manage'), async (req, res) => {
+  const { name, siteId, region, baseLatencyMs, jitterMs, dropRate } = req.body ?? {};
+  if (typeof name !== 'string' || !name.trim()) {
+    res.status(400).json({ error: 'name required' });
+    return;
+  }
+  const id = typeof siteId === 'string' && siteId.trim() ? siteId.trim() : slugify(name);
+  if (store.getSite(id)) {
+    res.status(409).json({ error: `hospital/site '${id}' already exists` });
+    return;
+  }
+  const profile: SiteRecord = {
+    siteId: id,
+    baseLatencyMs: clampNum(baseLatencyMs, 120, 0, 60_000),
+    jitterMs: clampNum(jitterMs, 40, 0, 5_000),
+    dropRate: clampNum(dropRate, 0, 0, 1),
+    host: 'localhost',
+    port: 0, // assigned when the in-process agent is hosted
+  };
+  const hospital = {
+    siteId: id,
+    name: name.trim(),
+    region: typeof region === 'string' && region.trim() ? region.trim() : 'Unassigned',
+    simulated: false,
+    createdAt: new Date().toISOString(),
+  };
+  store.registerSite(profile);
+  store.registerHospital(hospital);
+  const sim = await hostSimulatedHospital(id);
+  store.registerSite({ ...profile, port: sim.port });
+  ledger.append('HOSPITAL_ADDED', { siteId: id, name: hospital.name, region: hospital.region });
+  broadcast({ type: 'HOSPITAL', data: { action: 'added', ...hospital }, ts: new Date().toISOString() });
+  await replayHistoryToSite(store.getSite(id)!);
+  res.status(201).json({ ...hospital, ...pickNetwork(store.getSite(id)!) });
+});
+
+app.delete('/api/hospitals/:siteId', requirePermission('hospitals:manage'), async (req, res) => {
+  const siteId = req.params.siteId;
+  const site = store.getSite(siteId);
+  if (!site) {
+    res.status(404).json({ error: 'hospital not found' });
+    return;
+  }
+  const hospital = store.getHospital(siteId);
+  const removed = store.unregisterSite(siteId);
+  await teardownSimulatedHospital(siteId);
+  // Drop the watermark so a removed hospital stops gating the global epoch.
+  await fetch(`${COORDINATOR_URL}/internal/sites/remove`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-internal-key': INTERNAL_KEY },
+    body: JSON.stringify({ siteId }),
+    signal: AbortSignal.timeout(2000),
+  }).catch(() => undefined);
+  ledger.append('HOSPITAL_REMOVED', { siteId, name: hospital?.name ?? siteId, hadSite: !!removed });
+  broadcast({ type: 'HOSPITAL', data: { action: 'removed', siteId }, ts: new Date().toISOString() });
+  res.json({ ok: true, siteId });
+});
+
+// ── Simulated hospital generation (scalability testing) ─────────────────────
+// POST /api/hospitals/simulated { count: N } spins up N simulated hospitals,
+// each a real HTTP agent inside this process with realistic name/region and
+// randomized network profiles so fan-out/epoch behavior is observable at scale.
+
+app.post('/api/hospitals/simulated', requirePermission('hospitals:manage'), async (req, res) => {
+  const count = Number(req.body?.count);
+  if (!Number.isInteger(count) || count < 1 || count > 1000) {
+    res.status(400).json({ error: 'count must be an integer between 1 and 1000' });
+    return;
+  }
+  const siteIds = store.allocateSimSiteIds(count);
+  const created: Array<{ siteId: string; name: string; region: string; simulated: boolean; createdAt: string; baseLatencyMs: number; jitterMs: number; dropRate: number }> = [];
+  for (const [i, id] of siteIds.entries()) {
+    const profile: SiteRecord = {
+      siteId: id,
+      baseLatencyMs: 40 + Math.floor(Math.random() * 200),
+      jitterMs: Math.floor(Math.random() * 60),
+      dropRate: Math.random() < 0.15 ? Math.random() * 0.05 : 0,
+      host: 'localhost',
+      port: 0, // assigned by hostSimulatedHospital
+    };
+    const hospital = {
+      siteId: id,
+      name: generateHospitalName(i),
+      region: generateRegion(i),
+      simulated: true,
+      createdAt: new Date().toISOString(),
+    };
+    store.registerSite(profile);
+    store.registerHospital(hospital);
+    const sim = await hostSimulatedHospital(id);
+    store.registerSite({ ...profile, port: sim.port });
+    created.push({ ...hospital, ...pickNetwork(store.getSite(id)!) });
+  }
+  // Bring the new fleet up to the current rule set (replay history).
+  const t0 = Date.now();
+  await Promise.all(created.map((h) => replayHistoryToSite(store.getSite(h.siteId)!)));
+  const elapsedMs = Date.now() - t0;
+  ledger.append('SIM_HOSPITALS_GENERATED', { count, siteIds, replayMs: elapsedMs });
+  broadcast({ type: 'HOSPITAL', data: { action: 'simulated-batch', count, siteIds }, ts: new Date().toISOString() });
+  res.status(201).json({ count, created, replayMs: elapsedMs });
+});
+
+// ── Doctors (admin) ──────────────────────────────────────────────────────────
+// Doctors are users with role='doctor' + hospital affiliation. They log into
+// the doctor portal and publish reference rules.
+
+app.get('/api/doctors', requirePermission('users:manage'), (_req, res) => {
+  const hospitals = new Map(store.listHospitals().map((h) => [h.siteId, h.name]));
+  res.json(users.listDoctors().map((d) => ({
+    ...d,
+    hospitalName: d.hospitalId ? hospitals.get(d.hospitalId) ?? null : null,
+  })));
+});
+
+app.post('/api/doctors', requirePermission('users:manage'), (req, res) => {
+  const { username, password, fullName, hospitalId } = req.body ?? {};
+  if (typeof username !== 'string' || !/^[a-z0-9]([a-z0-9.-]{1,30}[a-z0-9])?$/.test(username.trim())) {
+    res.status(400).json({ error: 'username required (3-32 chars: lowercase letters, numbers, dots, dashes)' });
+    return;
+  }
+  if (typeof password !== 'string' || password.length < 8) {
+    res.status(400).json({ error: 'password (min 8 chars) required' });
+    return;
+  }
+  if (users.usernameTaken(username.trim())) {
+    res.status(409).json({ error: `username '${username.trim()}' already taken` });
+    return;
+  }
+  if (typeof hospitalId !== 'string' || !hospitalId.trim() || !store.getHospital(hospitalId.trim())) {
+    res.status(400).json({ error: 'hospitalId must reference an existing hospital' });
+    return;
+  }
+  const user = users.create(username.trim(), password, 'doctor', hospitalId.trim(), typeof fullName === 'string' && fullName.trim() ? fullName.trim() : undefined);
+  ledger.append('DOCTOR_ADDED', { userId: user.userId, username: user.username, hospitalId: user.hospitalId, fullName: user.fullName });
+  broadcast({ type: 'DOCTOR', data: { action: 'added', userId: user.userId, username: user.username, hospitalId: user.hospitalId }, ts: new Date().toISOString() });
+  res.status(201).json({ userId: user.userId, username: user.username, role: user.role, hospitalId: user.hospitalId, fullName: user.fullName });
+});
+
+app.delete('/api/doctors/:userId', requirePermission('users:manage'), (req, res) => {
+  const user = users.get(req.params.userId);
+  if (!user || user.role !== 'doctor') {
+    res.status(404).json({ error: 'doctor not found' });
+    return;
+  }
+  const removed = users.deleteUser(req.params.userId)!;
+  ledger.append('USER_REMOVED', { userId: removed.userId, username: removed.username, role: removed.role });
+  broadcast({ type: 'DOCTOR', data: { action: 'removed', userId: removed.userId, username: removed.username }, ts: new Date().toISOString() });
+  res.json({ ok: true, ...removed });
+});
+
+// Batch doctor generation — fills every hospital lacking a doctor with one
+// generated doctor (name, username, random demo password). For scale testing.
+app.post('/api/doctors/simulated', requirePermission('users:manage'), (req, res) => {
+  const count = Number(req.body?.count);
+  if (!Number.isInteger(count) || count < 1 || count > 1000) {
+    res.status(400).json({ error: 'count must be an integer between 1 and 1000' });
+    return;
+  }
+  const hospitals = store.listHospitals();
+  if (hospitals.length === 0) {
+    res.status(400).json({ error: 'no hospitals exist — add hospitals first' });
+    return;
+  }
+  // Distribute doctors across hospitals round-robin; skip taken usernames.
+  const created: Array<{ userId: string; username: string; fullName: string; hospitalId: string; password: string }> = [];
+  const existingDoctors = users.listDoctors().length;
+  for (let i = 0; i < count; i++) {
+    const hospital = hospitals[i % hospitals.length];
+    const { fullName, first, last } = generateDoctorName(existingDoctors + i);
+    let username = `${first}.${last}`.toLowerCase().replace(/[^a-z0-9.]/g, '');
+    if (users.usernameTaken(username)) username = `${username}${i + 2}`;
+    if (users.usernameTaken(username)) continue;
+    const password = generateDoctorPassword();
+    const user = users.create(username, password, 'doctor', hospital.siteId, fullName);
+    created.push({ userId: user.userId, username, fullName, hospitalId: hospital.siteId, password });
+  }
+  ledger.append('DOCTOR_ADDED', { batch: true, count: created.length });
+  broadcast({ type: 'DOCTOR', data: { action: 'simulated-batch', count: created.length }, ts: new Date().toISOString() });
+  res.status(201).json({ count: created.length, created });
+});
+
 // ── Audit ledger ─────────────────────────────────────────────────────────────
 app.get('/api/audit', requirePermission('audit:view'), (req, res) => {
   const offset = Number(req.query.offset ?? 0);
@@ -325,7 +655,11 @@ app.post('/api/orders', requirePermission('orders:submit'), async (req, res) => 
         const r = await fetch(`http://${site.host}:${site.port}/internal/evaluate`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'x-internal-key': INTERNAL_KEY },
-          body: JSON.stringify({ order: { orderId, orderCode, patientRef, details }, orderEpoch }),
+          body: JSON.stringify({
+            order: { orderId, orderCode, patientRef, details },
+            orderEpoch,
+            siteId: site.siteId, // simulated agents stamp results with this id
+          }),
           signal: AbortSignal.timeout(5000),
         });
         if (!r.ok) throw new Error(`site ${site.siteId} HTTP ${r.status}`);
@@ -380,6 +714,15 @@ const server = app.listen(PORT, () => {
   console.log(`[central-reference-service] listening on :${PORT}`);
   console.log(`[central-reference-service] sites registered: ${store.listSites().map((s) => s.siteId).join(', ')}`);
 });
+
+// Tear down simulated hospital agents on shutdown.
+const shutdown = () => {
+  for (const sim of simSites.values()) sim.handle.close();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref();
+};
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
 // ── WebSocket for live dashboard events (JWT via query param) ────────────────────
 const { WebSocketServer } = await import('ws');

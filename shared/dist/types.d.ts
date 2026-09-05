@@ -52,7 +52,7 @@ export interface AlertResult {
     provisional: boolean;
     evaluatedAt: string;
 }
-export type LedgerEventType = 'REFDATA_PUBLISHED' | 'REFDATA_RECEIVED' | 'EPOCH_ADVANCED' | 'ORDER_EVALUATED' | 'SITE_CHAOS_INJECTED' | 'SITE_UNREACHABLE';
+export type LedgerEventType = 'REFDATA_PUBLISHED' | 'REFDATA_RECEIVED' | 'EPOCH_ADVANCED' | 'ORDER_EVALUATED' | 'SITE_CHAOS_INJECTED' | 'SITE_UNREACHABLE' | 'HOSPITAL_ADDED' | 'HOSPITAL_REMOVED' | 'SIM_HOSPITALS_GENERATED' | 'DOCTOR_ADDED' | 'USER_REMOVED';
 export interface AuditBlock {
     index: number;
     timestamp: string;
@@ -84,7 +84,7 @@ export interface EpochUpdateMessage {
 }
 export type WireMessage = PushMessage | AckMessage | EpochUpdateMessage;
 export interface LiveEvent {
-    type: 'WATERMARK' | 'EPOCH' | 'ALERT_RESULT' | 'CHAOS' | 'PUBLISH' | 'RETRY' | 'UNREACHABLE' | 'LEDGER';
+    type: 'WATERMARK' | 'EPOCH' | 'ALERT_RESULT' | 'CHAOS' | 'PUBLISH' | 'RETRY' | 'UNREACHABLE' | 'LEDGER' | 'HOSPITAL' | 'DOCTOR';
     data: Record<string, unknown>;
     ts: string;
 }
