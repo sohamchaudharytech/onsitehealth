@@ -1,0 +1,29 @@
+{
+  "name": "onsitehackathon",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Distributed Clinical Reference-Data Consistency for Alert Generation",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -b",
+    "build": "tsc -b",
+    "start:central": "node services/central-reference-service/dist/index.js",
+    "start:coordinator": "node services/convergence-coordinator/dist/index.js",
+    "start:site": "node services/site-agent/dist/index.js",
+    "start:dashboard": "cd dashboard && npm run dev",
+    "demo": "node scripts/demo.mjs",
+    "seed": "node scripts/seed.mjs"
+  },
+  "workspaces": [
+    "services/*",
+    "shared",
+    "dashboard"
+  ],
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "@types/ws": "^8.18.1",
+    "ws": "^8.21.3"
+  }
+}

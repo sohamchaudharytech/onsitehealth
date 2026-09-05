@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  central:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    command: ["npx", "tsx", "services/central-reference-service/src/index.ts"]
+    environment:
+      PORT: "4001"
+      SITE_HOSTS: "site-a:4101,site-b:4102,site-c:4103"
+      COORDINATOR_URL: "http://coordinator:4002"
+    ports: ["4001:4001"]
+    depends_on: [coordinator]
+
+  coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    command: ["npx", "tsx", "services/convergence-coordinator/src/index.ts"]
+    environment:
+      PORT: "4002"
+      CENTRAL_URL: "http://central:4001"
+    ports: ["4002:4002"]
+
+  site-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    command: ["npx", "tsx", "services/site-agent/src/index.ts"]
+    environment:
+      SITE_ID: "site-a"
+      PORT: "4101"
+      COORDINATOR_URL: "http://coordinator:4002"
+      CENTRAL_URL: "http://central:4001"
+    depends_on: [coordinator, central]
+
+  site-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    command: ["npx", "tsx", "services/site-agent/src/index.ts"]
+    environment:
+      SITE_ID: "site-b"
+      PORT: "4102"
+      COORDINATOR_URL: "http://coordinator:4002"
+      CENTRAL_URL: "http://central:4001"
+    depends_on: [coordinator, central]
+
+  site-c:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    command: ["npx", "tsx", "services/site-agent/src/index.ts"]
+    environment:
+      SITE_ID: "site-c"
+      PORT: "4103"
+      COORDINATOR_URL: "http://coordinator:4002"
+      CENTRAL_URL: "http://central:4001"
+    depends_on: [coordinator, central]
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: ../Dockerfile.dashboard
+    ports: ["5173:5173"]
+    depends_on: [central, coordinator]
