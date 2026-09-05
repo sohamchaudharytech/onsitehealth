@@ -1,4 +1,4 @@
-import type { ReferenceRuleVersion, SiteNetworkProfile } from '@hc/shared';
+import type { HospitalDrug, ReferenceRuleVersion, RulePublisher, SiteNetworkProfile } from '@hc/shared';
 
 /** Extended profile with network location of the site agent process. */
 export interface SiteRecord extends SiteNetworkProfile {
@@ -29,8 +29,10 @@ export class CentralStore {
   private hospitals = new Map<string, HospitalRecord>();
   /** sim-N slot allocation (siteId -> N) so successive sim batches never collide */
   private nextSimNumber = new Map<string, number>();
+  /** hospital formulary: drug id -> record */
+  private drugs = new Map<string, HospitalDrug>();
 
-  publish(ruleId: string, payload: Record<string, unknown>): ReferenceRuleVersion {
+  publish(ruleId: string, payload: Record<string, unknown>, publishedBy?: RulePublisher): ReferenceRuleVersion {
     const versions = this.rules.get(ruleId) ?? new Map<number, ReferenceRuleVersion>();
     const version = versions.size + 1;
     const globalSeq = this.nextGlobalSeq++;
@@ -41,6 +43,7 @@ export class CentralStore {
       payload,
       contentHash: '',
       createdAt: new Date().toISOString(),
+      ...(publishedBy ? { publishedBy } : {}),
     };
     // contentHash computed by caller (avoids import cycle in store)
     versions.set(version, rec);
@@ -62,6 +65,13 @@ export class CentralStore {
     return [...this.bySeq.values()].sort((a, b) => a.globalSeq - b.globalSeq);
   }
 
+  /** Latest version of each rule (newest globalSeq wins), for dashboard views. */
+  latestVersions(): ReferenceRuleVersion[] {
+    const latest = new Map<string, ReferenceRuleVersion>();
+    for (const rec of this.bySeq.values()) latest.set(rec.ruleId, rec);
+    return [...latest.values()].sort((a, b) => b.globalSeq - a.globalSeq);
+  }
+
   latestSeq(): number {
     return this.nextGlobalSeq - 1;
   }
@@ -75,6 +85,7 @@ export class CentralStore {
     if (rec) this.sites.delete(siteId);
     this.hospitals.delete(siteId);
     this.nextSimNumber.delete(siteId);
+    this.clearHospitalDrugs(siteId);
     return rec;
   }
 
@@ -125,5 +136,41 @@ export class CentralStore {
 
   listSites(): SiteRecord[] {
     return [...this.sites.values()];
+  }
+
+  // ── Hospital formulary (drugs provisioned per hospital) ─────────────────────
+
+  addDrugToHospital(drug: HospitalDrug): void {
+    this.drugs.set(drug.id, drug);
+  }
+
+  removeDrug(drugId: string): HospitalDrug | null {
+    const rec = this.drugs.get(drugId) ?? null;
+    if (rec) this.drugs.delete(drugId);
+    return rec;
+  }
+
+  drugsAtHospital(hospitalId: string): HospitalDrug[] {
+    return [...this.drugs.values()]
+      .filter((d) => d.hospitalId === hospitalId)
+      .sort((a, b) => a.drugName.localeCompare(b.drugName));
+  }
+
+  /** True if the hospital already stocks a drug with this name (case-insensitive). */
+  hospitalHasDrug(hospitalId: string, drugName: string): boolean {
+    const needle = drugName.trim().toLowerCase();
+    return [...this.drugs.values()].some((d) => d.hospitalId === hospitalId && d.drugName.toLowerCase() === needle);
+  }
+
+  /** Drug names stocked anywhere — for autocomplete/distinct lists. */
+  allDrugNames(): string[] {
+    return [...new Set([...this.drugs.values()].map((d) => d.drugName))].sort((a, b) => a.localeCompare(b));
+  }
+
+  /** Drop all formulary rows for a removed hospital. */
+  clearHospitalDrugs(hospitalId: string): void {
+    for (const [id, d] of this.drugs) {
+      if (d.hospitalId === hospitalId) this.drugs.delete(id);
+    }
   }
 }

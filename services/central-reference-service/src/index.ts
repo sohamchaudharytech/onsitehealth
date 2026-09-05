@@ -14,10 +14,12 @@ import {
   errorHandler,
   signJwt,
   verifyJwt,
+  newOpaqueToken,
   EpochGatedEvaluator,
   SiteCache,
   type AlertResult,
   type ClinicalOrder,
+  type HospitalDrug,
   type LiveEvent,
   type ReferenceRuleVersion,
 } from '@hc/shared';
@@ -294,7 +296,15 @@ app.post('/api/reference/rules', requirePermission('reference:publish'), (req, r
     res.status(400).json({ error: 'ruleId (string) and payload (object) required' });
     return;
   }
-  const rec = store.publish(ruleId, payload);
+  // Attribution: who published this version (admin or doctor + affiliation).
+  const user = users.get(req.user!.userId);
+  const publishedBy = {
+    userId: req.user!.userId,
+    username: req.user!.username,
+    role: req.user!.role,
+    hospitalId: user?.hospitalId ?? null,
+  };
+  const rec = store.publish(ruleId, payload, publishedBy);
   rec.contentHash = contentHashOf(payload);
   ledger.append('REFDATA_PUBLISHED', {
     ruleId,
@@ -302,8 +312,9 @@ app.post('/api/reference/rules', requirePermission('reference:publish'), (req, r
     globalSeq: rec.globalSeq,
     contentHash: rec.contentHash,
     payload,
+    publishedBy,
   });
-  broadcast({ type: 'PUBLISH', data: { ruleId, version: rec.version, globalSeq: rec.globalSeq }, ts: new Date().toISOString() });
+  broadcast({ type: 'PUBLISH', data: { ruleId, version: rec.version, globalSeq: rec.globalSeq, publishedBy: { username: publishedBy.username, role: publishedBy.role } }, ts: new Date().toISOString() });
 
   // fire-and-forget fan-out to all sites through the simulated network
   for (const site of store.listSites()) {
@@ -321,7 +332,11 @@ app.post('/api/reference/rules', requirePermission('reference:publish'), (req, r
   res.status(201).json(rec);
 });
 
-app.get('/api/reference/rules', (_req, res) => {
+app.get('/api/reference/rules', (req, res) => {
+  if (req.query.latest === '1' || req.query.latest === 'true') {
+    res.json(store.latestVersions());
+    return;
+  }
   res.json(store.allRules());
 });
 
@@ -571,6 +586,121 @@ app.post('/api/doctors/simulated', requirePermission('users:manage'), (req, res)
   ledger.append('DOCTOR_ADDED', { batch: true, count: created.length });
   broadcast({ type: 'DOCTOR', data: { action: 'simulated-batch', count: created.length }, ts: new Date().toISOString() });
   res.status(201).json({ count: created.length, created });
+});
+
+// ── Hospital formulary (drugs per hospital) ──────────────────────────────────
+// Drugs can be provisioned to one hospital (its page) or a chosen subset of
+// hospitals (multi-select provide) — so a doctor/admin controls exactly
+// which hospitals stock which medicine.
+
+/** Resolve the acting user for attribution. */
+function actingUser(req: { user?: { userId: string; username: string; role: string } }): { userId: string; username: string; role: string } {
+  return req.user ? { userId: req.user.userId, username: req.user.username, role: req.user.role } : null!;
+}
+
+// Hospital detail: domain record + site network profile + formulary + doctor roster.
+app.get('/api/hospitals/:siteId', (req, res) => {
+  const siteId = req.params.siteId;
+  const hospital = store.getHospital(siteId);
+  if (!hospital) {
+    res.status(404).json({ error: 'hospital not found' });
+    return;
+  }
+  const site = store.getSite(siteId);
+  const doctors = users.listDoctors().filter((d) => d.hospitalId === siteId);
+  res.json({
+    ...hospital,
+    network: site ? pickNetwork(site) : null,
+    drugs: store.drugsAtHospital(siteId),
+    doctors,
+  });
+});
+
+// All distinct drug names stocked anywhere (autocomplete).
+app.get('/api/drugs', (_req, res) => {
+  res.json(store.allDrugNames());
+});
+
+// Provision a drug to one hospital (hospital page form).
+app.post('/api/hospitals/:siteId/drugs', requirePermission('formulary:manage'), (req, res) => {
+  const siteId = req.params.siteId;
+  const { drugName } = req.body ?? {};
+  if (!store.getHospital(siteId)) {
+    res.status(404).json({ error: 'hospital not found' });
+    return;
+  }
+  if (typeof drugName !== 'string' || !drugName.trim()) {
+    res.status(400).json({ error: 'drugName required' });
+    return;
+  }
+  const name = drugName.trim();
+  if (store.hospitalHasDrug(siteId, name)) {
+    res.status(409).json({ error: `${siteId} already stocks '${name}'` });
+    return;
+  }
+  const drug: HospitalDrug = {
+    id: `drug-${newOpaqueToken().slice(0, 12)}`,
+    drugName: name,
+    hospitalId: siteId,
+    addedBy: actingUser(req),
+    addedAt: new Date().toISOString(),
+  };
+  store.addDrugToHospital(drug);
+  ledger.append('DRUG_ADDED_TO_HOSPITAL', { drugId: drug.id, drugName: name, hospitalId: siteId, addedBy: drug.addedBy });
+  broadcast({ type: 'DRUG', data: { action: 'added', drugName: name, hospitalId: siteId, addedBy: drug.addedBy?.username }, ts: new Date().toISOString() });
+  res.status(201).json(drug);
+});
+
+// Provision a drug to a chosen subset of hospitals (multi-provide form).
+app.post('/api/drugs/provide', requirePermission('formulary:manage'), (req, res) => {
+  const { drugName, hospitalIds } = req.body ?? {};
+  if (typeof drugName !== 'string' || !drugName.trim()) {
+    res.status(400).json({ error: 'drugName required' });
+    return;
+  }
+  const name = drugName.trim();
+  if (!Array.isArray(hospitalIds) || hospitalIds.length === 0 || !hospitalIds.every((h) => typeof h === 'string')) {
+    res.status(400).json({ error: 'hospitalIds (non-empty string[]) required — pick at least one hospital' });
+    return;
+  }
+  const addedBy = actingUser(req);
+  const provided: HospitalDrug[] = [];
+  const skipped: Array<{ hospitalId: string; reason: string }> = [];
+  for (const hospitalId of hospitalIds as string[]) {
+    if (!store.getHospital(hospitalId)) {
+      skipped.push({ hospitalId, reason: 'not found' });
+      continue;
+    }
+    if (store.hospitalHasDrug(hospitalId, name)) {
+      skipped.push({ hospitalId, reason: 'already stocks it' });
+      continue;
+    }
+    const drug: HospitalDrug = {
+      id: `drug-${newOpaqueToken().slice(0, 12)}`,
+      drugName: name,
+      hospitalId,
+      addedBy,
+      addedAt: new Date().toISOString(),
+    };
+    store.addDrugToHospital(drug);
+    provided.push(drug);
+    ledger.append('DRUG_ADDED_TO_HOSPITAL', { drugId: drug.id, drugName: name, hospitalId, addedBy, provideAll: false });
+    broadcast({ type: 'DRUG', data: { action: 'added', drugName: name, hospitalId, addedBy: addedBy.username }, ts: new Date().toISOString() });
+  }
+  res.status(201).json({ drugName: name, provided: provided.length, providedTo: provided.map((d) => d.hospitalId), skipped });
+});
+
+// Remove a drug from a hospital (hospital page remove button).
+app.delete('/api/hospitals/:siteId/drugs/:drugId', requirePermission('formulary:manage'), (req, res) => {
+  const drug = store.drugsAtHospital(req.params.siteId).find((d) => d.id === req.params.drugId);
+  if (!drug) {
+    res.status(404).json({ error: 'drug not found at this hospital' });
+    return;
+  }
+  store.removeDrug(drug.id);
+  ledger.append('DRUG_REMOVED_FROM_HOSPITAL', { drugId: drug.id, drugName: drug.drugName, hospitalId: drug.hospitalId });
+  broadcast({ type: 'DRUG', data: { action: 'removed', drugName: drug.drugName, hospitalId: drug.hospitalId }, ts: new Date().toISOString() });
+  res.json({ ok: true });
 });
 
 // ── Audit ledger ─────────────────────────────────────────────────────────────

@@ -12,7 +12,9 @@ export class CentralStore {
     hospitals = new Map();
     /** sim-N slot allocation (siteId -> N) so successive sim batches never collide */
     nextSimNumber = new Map();
-    publish(ruleId, payload) {
+    /** hospital formulary: drug id -> record */
+    drugs = new Map();
+    publish(ruleId, payload, publishedBy) {
         const versions = this.rules.get(ruleId) ?? new Map();
         const version = versions.size + 1;
         const globalSeq = this.nextGlobalSeq++;
@@ -23,6 +25,7 @@ export class CentralStore {
             payload,
             contentHash: '',
             createdAt: new Date().toISOString(),
+            ...(publishedBy ? { publishedBy } : {}),
         };
         // contentHash computed by caller (avoids import cycle in store)
         versions.set(version, rec);
@@ -40,6 +43,13 @@ export class CentralStore {
     allRules() {
         return [...this.bySeq.values()].sort((a, b) => a.globalSeq - b.globalSeq);
     }
+    /** Latest version of each rule (newest globalSeq wins), for dashboard views. */
+    latestVersions() {
+        const latest = new Map();
+        for (const rec of this.bySeq.values())
+            latest.set(rec.ruleId, rec);
+        return [...latest.values()].sort((a, b) => b.globalSeq - a.globalSeq);
+    }
     latestSeq() {
         return this.nextGlobalSeq - 1;
     }
@@ -52,6 +62,7 @@ export class CentralStore {
             this.sites.delete(siteId);
         this.hospitals.delete(siteId);
         this.nextSimNumber.delete(siteId);
+        this.clearHospitalDrugs(siteId);
         return rec;
     }
     // ── Hospitals (domain records layered on sites) ───────────────────────────
@@ -96,6 +107,37 @@ export class CentralStore {
     }
     listSites() {
         return [...this.sites.values()];
+    }
+    // ── Hospital formulary (drugs provisioned per hospital) ─────────────────────
+    addDrugToHospital(drug) {
+        this.drugs.set(drug.id, drug);
+    }
+    removeDrug(drugId) {
+        const rec = this.drugs.get(drugId) ?? null;
+        if (rec)
+            this.drugs.delete(drugId);
+        return rec;
+    }
+    drugsAtHospital(hospitalId) {
+        return [...this.drugs.values()]
+            .filter((d) => d.hospitalId === hospitalId)
+            .sort((a, b) => a.drugName.localeCompare(b.drugName));
+    }
+    /** True if the hospital already stocks a drug with this name (case-insensitive). */
+    hospitalHasDrug(hospitalId, drugName) {
+        const needle = drugName.trim().toLowerCase();
+        return [...this.drugs.values()].some((d) => d.hospitalId === hospitalId && d.drugName.toLowerCase() === needle);
+    }
+    /** Drug names stocked anywhere — for autocomplete/distinct lists. */
+    allDrugNames() {
+        return [...new Set([...this.drugs.values()].map((d) => d.drugName))].sort((a, b) => a.localeCompare(b));
+    }
+    /** Drop all formulary rows for a removed hospital. */
+    clearHospitalDrugs(hospitalId) {
+        for (const [id, d] of this.drugs) {
+            if (d.hospitalId === hospitalId)
+                this.drugs.delete(id);
+        }
     }
 }
 //# sourceMappingURL=store.js.map

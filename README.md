@@ -106,6 +106,8 @@ auto-refreshes on 401 and supports logout. Passwords are scrypt-hashed.
 | `dashboard:view` | all |
 | `audit:view` | admin, auditor |
 | `users:manage` | admin |
+| `hospitals:manage` | admin |
+| `formulary:manage` (provision drugs) | admin, doctor |
 
 The dashboard disables buttons the current role can't use (with a tooltip
 explaining why); the server enforces the same matrix regardless of client.
@@ -180,10 +182,16 @@ GET  /api/hospitals                 — hospitals with network profile + doctor 
 POST /api/hospitals                 — add hospital (name/region/siteId) (admin)
 POST /api/hospitals/simulated       — generate N simulated hospitals for scale testing (admin)
 DELETE /api/hospitals/:siteId       — remove hospital + agent + watermark (admin)
+GET  /api/hospitals/:siteId         — hospital detail: network, formulary, doctors
+POST /api/hospitals/:siteId/drugs   — provision one drug to this hospital (admin/doctor)
+DELETE /api/hospitals/:siteId/drugs/:drugId — remove drug from hospital (admin/doctor)
+GET  /api/drugs                    — distinct drug names stocked anywhere
+POST /api/drugs/provide            — provision a drug to a chosen subset of hospitals (admin/doctor)
 GET  /api/doctors                   — doctors with hospital affiliations (admin)
 POST /api/doctors                   — add doctor (username/password/hospitalId) (admin)
 POST /api/doctors/simulated         — batch-generate test doctors (admin)
 DELETE /api/doctors/:userId         — remove doctor (admin)
+GET  /api/reference/rules?latest=1  — latest rule versions with attribution
 GET  /api/epoch                     — current global active epoch (coordinator)
 GET  /api/watermarks                — all site watermarks + epoch (coordinator)
 POST /api/orders                    — identical order → all sites (admin/operator)
@@ -196,6 +204,12 @@ WS   /ws/epoch                     — epoch pub/sub for site agents (?key=)
 
 All `/api/*` routes require a Bearer JWT except `/api/auth/*`; internal
 service routes require `x-internal-key` instead.
+
+**Attribution:** every rule version records who published it (username,
+role, hospital for doctors) — visible in the admin/doctor rules tables.
+**Formulary:** each hospital has its own drug list (who provisioned what,
+when); drugs can be provisioned per-hospital from the hospital page or to a
+chosen subset of hospitals from the dashboard.
 
 **Simulated hospitals for scale testing:** each generated hospital runs a
 real in-process agent (identical `/internal/push` + `/internal/evaluate`

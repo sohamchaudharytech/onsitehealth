@@ -10,6 +10,7 @@ export const PERMISSIONS = {
     'audit:view': ['admin', 'auditor'],
     'users:manage': ['admin'],
     'hospitals:manage': ['admin'],
+    'formulary:manage': ['admin', 'doctor'],
 };
 export function can(role, permission) {
     if (!role)

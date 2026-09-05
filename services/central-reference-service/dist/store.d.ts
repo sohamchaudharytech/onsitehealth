@@ -1,4 +1,4 @@
-import type { ReferenceRuleVersion, SiteNetworkProfile } from '@hc/shared';
+import type { HospitalDrug, ReferenceRuleVersion, RulePublisher, SiteNetworkProfile } from '@hc/shared';
 /** Extended profile with network location of the site agent process. */
 export interface SiteRecord extends SiteNetworkProfile {
     host: string;
@@ -26,10 +26,14 @@ export declare class CentralStore {
     private hospitals;
     /** sim-N slot allocation (siteId -> N) so successive sim batches never collide */
     private nextSimNumber;
-    publish(ruleId: string, payload: Record<string, unknown>): ReferenceRuleVersion;
+    /** hospital formulary: drug id -> record */
+    private drugs;
+    publish(ruleId: string, payload: Record<string, unknown>, publishedBy?: RulePublisher): ReferenceRuleVersion;
     setHash(rec: ReferenceRuleVersion, contentHash: string): void;
     allVersions(ruleId: string): ReferenceRuleVersion[];
     allRules(): ReferenceRuleVersion[];
+    /** Latest version of each rule (newest globalSeq wins), for dashboard views. */
+    latestVersions(): ReferenceRuleVersion[];
     latestSeq(): number;
     registerSite(profile: SiteRecord): void;
     unregisterSite(siteId: string): SiteRecord | null;
@@ -46,5 +50,14 @@ export declare class CentralStore {
     updateSiteNetwork(siteId: string, patch: Partial<SiteNetworkProfile>): SiteRecord | null;
     getSite(siteId: string): SiteRecord | null;
     listSites(): SiteRecord[];
+    addDrugToHospital(drug: HospitalDrug): void;
+    removeDrug(drugId: string): HospitalDrug | null;
+    drugsAtHospital(hospitalId: string): HospitalDrug[];
+    /** True if the hospital already stocks a drug with this name (case-insensitive). */
+    hospitalHasDrug(hospitalId: string, drugName: string): boolean;
+    /** Drug names stocked anywhere — for autocomplete/distinct lists. */
+    allDrugNames(): string[];
+    /** Drop all formulary rows for a removed hospital. */
+    clearHospitalDrugs(hospitalId: string): void;
 }
 //# sourceMappingURL=store.d.ts.map

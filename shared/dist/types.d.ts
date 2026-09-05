@@ -10,6 +10,16 @@ export interface ReferenceRuleVersion {
     /** sha256(canonicalJson(payload)) */
     contentHash: string;
     createdAt: string;
+    /** who published this version (attribution) */
+    publishedBy?: RulePublisher;
+}
+/** Attribution stamped on every rule version at publish time. */
+export interface RulePublisher {
+    userId: string;
+    username: string;
+    role: string;
+    /** hospital the publishing doctor is affiliated with, if any */
+    hospitalId?: string | null;
 }
 /** The world as of globalSeq N: every rule resolved to its version at that seq. */
 export interface ReferenceSnapshot {
@@ -52,7 +62,7 @@ export interface AlertResult {
     provisional: boolean;
     evaluatedAt: string;
 }
-export type LedgerEventType = 'REFDATA_PUBLISHED' | 'REFDATA_RECEIVED' | 'EPOCH_ADVANCED' | 'ORDER_EVALUATED' | 'SITE_CHAOS_INJECTED' | 'SITE_UNREACHABLE' | 'HOSPITAL_ADDED' | 'HOSPITAL_REMOVED' | 'SIM_HOSPITALS_GENERATED' | 'DOCTOR_ADDED' | 'USER_REMOVED';
+export type LedgerEventType = 'REFDATA_PUBLISHED' | 'REFDATA_RECEIVED' | 'EPOCH_ADVANCED' | 'ORDER_EVALUATED' | 'SITE_CHAOS_INJECTED' | 'SITE_UNREACHABLE' | 'HOSPITAL_ADDED' | 'HOSPITAL_REMOVED' | 'SIM_HOSPITALS_GENERATED' | 'DOCTOR_ADDED' | 'USER_REMOVED' | 'DRUG_ADDED_TO_HOSPITAL' | 'DRUG_REMOVED_FROM_HOSPITAL';
 export interface AuditBlock {
     index: number;
     timestamp: string;
@@ -84,8 +94,21 @@ export interface EpochUpdateMessage {
 }
 export type WireMessage = PushMessage | AckMessage | EpochUpdateMessage;
 export interface LiveEvent {
-    type: 'WATERMARK' | 'EPOCH' | 'ALERT_RESULT' | 'CHAOS' | 'PUBLISH' | 'RETRY' | 'UNREACHABLE' | 'LEDGER' | 'HOSPITAL' | 'DOCTOR';
+    type: 'WATERMARK' | 'EPOCH' | 'ALERT_RESULT' | 'CHAOS' | 'PUBLISH' | 'RETRY' | 'UNREACHABLE' | 'LEDGER' | 'HOSPITAL' | 'DOCTOR' | 'DRUG';
     data: Record<string, unknown>;
     ts: string;
+}
+/** A drug stocked/provisioned at a specific hospital. */
+export interface HospitalDrug {
+    id: string;
+    drugName: string;
+    hospitalId: string;
+    /** who provisioned this drug at this hospital */
+    addedBy: {
+        userId: string;
+        username: string;
+        role: string;
+    } | null;
+    addedAt: string;
 }
 //# sourceMappingURL=types.d.ts.map

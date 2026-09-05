@@ -12,6 +12,17 @@ export interface ReferenceRuleVersion {
   /** sha256(canonicalJson(payload)) */
   contentHash: string;
   createdAt: string;
+  /** who published this version (attribution) */
+  publishedBy?: RulePublisher;
+}
+
+/** Attribution stamped on every rule version at publish time. */
+export interface RulePublisher {
+  userId: string;
+  username: string;
+  role: string;
+  /** hospital the publishing doctor is affiliated with, if any */
+  hospitalId?: string | null;
 }
 
 /** The world as of globalSeq N: every rule resolved to its version at that seq. */
@@ -75,7 +86,9 @@ export type LedgerEventType =
   | 'HOSPITAL_REMOVED'
   | 'SIM_HOSPITALS_GENERATED'
   | 'DOCTOR_ADDED'
-  | 'USER_REMOVED';
+  | 'USER_REMOVED'
+  | 'DRUG_ADDED_TO_HOSPITAL'
+  | 'DRUG_REMOVED_FROM_HOSPITAL';
 
 export interface AuditBlock {
   index: number;
@@ -128,7 +141,20 @@ export interface LiveEvent {
     | 'UNREACHABLE'
     | 'LEDGER'
     | 'HOSPITAL'
-    | 'DOCTOR';
+    | 'DOCTOR'
+    | 'DRUG';
   data: Record<string, unknown>;
   ts: string;
+}
+
+// ── Hospital formulary (drug catalog per hospital) ───────────────────────────
+
+/** A drug stocked/provisioned at a specific hospital. */
+export interface HospitalDrug {
+  id: string;
+  drugName: string;
+  hospitalId: string;
+  /** who provisioned this drug at this hospital */
+  addedBy: { userId: string; username: string; role: string } | null;
+  addedAt: string;
 }

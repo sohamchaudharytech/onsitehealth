@@ -12,6 +12,7 @@ export declare const PERMISSIONS: {
     readonly 'audit:view': readonly ["admin", "auditor"];
     readonly 'users:manage': readonly ["admin"];
     readonly 'hospitals:manage': readonly ["admin"];
+    readonly 'formulary:manage': readonly ["admin", "doctor"];
 };
 export type Permission = keyof typeof PERMISSIONS;
 export declare function can(role: Role | undefined, permission: Permission): boolean;
