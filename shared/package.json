@@ -11,7 +11,12 @@
     "./ledger": "./dist/ledger.js",
     "./backoff": "./dist/backoff.js",
     "./engine": "./dist/engine.js",
-    "./net": "./dist/net.js"
+    "./net": "./dist/net.js",
+    "./auth": "./dist/auth.js",
+    "./rbac": "./dist/rbac.js",
+    "./sanitize": "./dist/sanitize.js",
+    "./ratelimit": "./dist/ratelimit.js",
+    "./http": "./dist/http.js"
   },
   "devDependencies": {
     "typescript": "^5.6.3"

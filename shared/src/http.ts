@@ -1,0 +1,75 @@
+import type { ErrorRequestHandler, NextFunction, Request, RequestHandler, Response } from 'express';
+import { randomUUID } from 'node:crypto';
+import { verifyJwt, type JwtPayload } from './auth.js';
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      requestId?: string;
+      user?: JwtPayload;
+    }
+  }
+}
+
+/** Request-id + structured logging with correlation (PRD §7.7). */
+export function requestLogger(): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    req.requestId = randomUUID();
+    const start = Date.now();
+    res.setHeader('X-Request-Id', req.requestId);
+    res.on('finish', () => {
+      const line = `[${req.requestId}] ${req.method} ${req.path} ${res.statusCode} ${Date.now() - start}ms ip=${req.ip}`;
+      if (res.statusCode >= 500) console.error(line);
+      else if (res.statusCode >= 400) console.warn(line);
+      else console.log(line);
+    });
+    next();
+  };
+}
+
+/**
+ * JWT auth middleware. Sets req.user on success; 401 on missing/invalid
+ * token. Routes that need it apply it explicitly (public routes like
+ * /healthz and /api/auth/login skip it).
+ */
+export function jwtAuth(secret: string): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const header = req.headers.authorization;
+    if (!header?.startsWith('Bearer ')) {
+      res.status(401).json({ error: 'missing bearer token' });
+      return;
+    }
+    const payload = verifyJwt(header.slice(7), secret);
+    if (!payload) {
+      res.status(401).json({ error: 'invalid or expired token' });
+      return;
+    }
+    req.user = payload;
+    next();
+  };
+}
+
+/**
+ * Guard for service-to-service /internal routes. The internal key is a
+ * shared secret provisioned to site agents and the coordinator — NOT a
+ * substitute for JWT, which governs all human/dashboard traffic.
+ */
+export function internalKeyGuard(internalKey: string): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const provided = req.headers['x-internal-key'];
+    if (typeof provided !== 'string' || provided !== internalKey) {
+      res.status(401).json({ error: 'invalid internal key' });
+      return;
+    }
+    next();
+  };
+}
+
+/** Centralized error handler — never leaks stack traces to the client. */
+export function errorHandler(serviceName: string): ErrorRequestHandler {
+  return (err: Error, _req: Request, res: Response, _next: NextFunction): void => {
+    console.error(`[${serviceName}] unhandled error:`, err.message);
+    res.status(500).json({ error: 'internal error' });
+  };
+}

@@ -1,4 +1,5 @@
 import { isDropped, networkDelay, retryWithBackoff, sleep } from '@hc/shared';
+const INTERNAL_KEY = process.env.INTERNAL_KEY ?? 'dev-internal-key';
 /**
  * Delivers a rule version to a site through the simulated network:
  * latency + jitter, then a Bernoulli drop decision, retried with
@@ -15,7 +16,7 @@ export async function pushToSite(ctx, site, ruleVersion) {
         }
         const res = await fetch(`http://${site.host}:${site.port}/internal/push`, {
             method: 'POST',
-            headers: { 'content-type': 'application/json' },
+            headers: { 'content-type': 'application/json', 'x-internal-key': INTERNAL_KEY },
             body: JSON.stringify({ kind: 'PUSH', ruleVersion }),
             signal: AbortSignal.timeout(4000),
         });

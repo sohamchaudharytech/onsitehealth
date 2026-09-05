@@ -2,6 +2,8 @@ import type { ReferenceRuleVersion } from '@hc/shared';
 import { isDropped, networkDelay, retryWithBackoff, sleep } from '@hc/shared';
 import type { CentralStore, SiteRecord } from './store.js';
 
+const INTERNAL_KEY = process.env.INTERNAL_KEY ?? 'dev-internal-key';
+
 export interface PusherContext {
   store: CentralStore;
   ledger: { append: (t: import('@hc/shared').LedgerEventType, p: Record<string, unknown>) => import('@hc/shared').AuditBlock };
@@ -36,7 +38,7 @@ export async function pushToSite(
       }
       const res = await fetch(`http://${site.host}:${site.port}/internal/push`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', 'x-internal-key': INTERNAL_KEY },
         body: JSON.stringify({ kind: 'PUSH', ruleVersion }),
         signal: AbortSignal.timeout(4000),
       });

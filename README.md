@@ -78,6 +78,59 @@ The dashboard shows the same story live: site cards flip to "cached ahead —
 gated, not yet active", the epoch holds, and the side-by-side comparison shows
 identical results with a **CONSISTENT** badge.
 
+## Security layer (PRD §7.4–7.8)
+
+All dashboard/API access is authenticated. Demo accounts (seeded at startup):
+
+| Username | Password | Role |
+|----------|----------|------|
+| `admin` | `admin123` | admin |
+| `operator` | `operator123` | operator |
+| `auditor` | `auditor123` | auditor |
+| `viewer` | `viewer123` | viewer |
+
+**Auth flow:** `POST /api/auth/login` → 15-min HS256 JWT access token
+(`{userId, username, role}`) + opaque refresh token. Refresh tokens are stored
+**hashed** (sha256) server-side, rotated on every use, and **reuse of a rotated
+token revokes the entire token family** (theft detection). The dashboard
+auto-refreshes on 401 and supports logout. Passwords are scrypt-hashed.
+
+**RBAC permission matrix** (`shared/src/rbac.ts`):
+
+| Permission | Roles |
+|------------|-------|
+| `reference:publish` | admin |
+| `sites:manage` (chaos) | admin |
+| `orders:submit` | admin, operator |
+| `dashboard:view` | all |
+| `audit:view` | admin, auditor |
+| `users:manage` | admin |
+
+The dashboard disables buttons the current role can't use (with a tooltip
+explaining why); the server enforces the same matrix regardless of client.
+
+**Middleware pipeline** (order matters, `shared/src/http.ts`):
+
+```
+helmet → cors → json body-parser (size-capped) → request-id/logger
+  → rate limiter → sanitize → JWT auth → RBAC → handler → error handler
+```
+
+- **Sanitization:** request bodies are recursively stripped of keys starting
+  with `$` or containing `.` (NoSQL operator injection — the demo proves a
+  `{$ne: ""}` login bypass is neutralized and logged).
+- **Rate limiting:** sliding-window per-(IP, route) and per-(identity, route),
+  with escalating windows for repeat offenders. Login: 10/min; `/api/auth`:
+  30/min; `/api`: 240/min. 429s include `Retry-After`.
+- **Service-to-service auth is a separate trust domain:** internal routes
+  (`/internal/*` on coordinator + site agents, `/internal/epoch-advanced`,
+  `/internal/evaluations` on central) require the `x-internal-key` header —
+  dashboard-user JWTs are never accepted there, and internal keys are never
+  accepted on user routes.
+- **WebSocket auth:** browsers can't set WS headers, so auth rides the query
+  string — `?key=` (internal key) for site agents on `/ws/epoch`, `?token=`
+  (JWT) for the dashboard on `/ws/live`.
+
 ## Architecture
 
 ```
@@ -113,21 +166,27 @@ docker-compose.yml               # one container per service
 ## API surface
 
 ```
-POST /api/reference/rules              — publish new version (assigns globalSeq)
+POST /api/auth/login                — username+password → JWT + refresh token
+POST /api/auth/refresh              — rotate refresh token → new JWT (reuse = revoke family)
+POST /api/auth/logout               — revoke refresh token family
+POST /api/reference/rules           — publish new version (admin)
 GET  /api/reference/rules
 GET  /api/reference/rules/:ruleId/history
-POST /api/sites                       — register site + network profile
-PATCH /api/sites/:siteId/network      — live-tune latency/jitter/drop (chaos lever)
+POST /api/sites                     — register site + network profile (admin)
+PATCH /api/sites/:siteId/network    — live-tune latency/jitter/drop (admin)
 GET  /api/sites
-GET  /api/epoch                       — current global active epoch (coordinator)
-GET  /api/watermarks                  — all site watermarks + epoch (coordinator)
-POST /api/orders                      — identical order → all sites (epoch-stamped)
+GET  /api/epoch                     — current global active epoch (coordinator)
+GET  /api/watermarks                — all site watermarks + epoch (coordinator)
+POST /api/orders                    — identical order → all sites (admin/operator)
 GET  /api/orders/:orderId/results
-GET  /api/audit                       — paginated hash-chained ledger
-GET  /api/audit/verify                — walk chain, report integrity
-WS   /ws/live                         — live events for the dashboard
-WS   /ws/epoch                        — epoch pub/sub for site agents
+GET  /api/audit                     — paginated hash-chained ledger (admin/auditor)
+GET  /api/audit/verify              — walk chain, report integrity (admin/auditor)
+WS   /ws/live                      — live events for the dashboard (?token=)
+WS   /ws/epoch                     — epoch pub/sub for site agents (?key=)
 ```
+
+All `/api/*` routes require a Bearer JWT except `/api/auth/*`; internal
+service routes require `x-internal-key` instead.
 
 ## Honest caveats (say these if a judge pushes)
 
@@ -139,8 +198,15 @@ WS   /ws/epoch                        — epoch pub/sub for site agents
   the overclaim.
 - Storage is in-memory in this phase (MongoDB persistence is a later phase per
   the PRD's build plan); the consistency mechanism is unaffected.
-- Auth/RBAC/rate-limiting (PRD §7.4–7.8) are later phases — the demoable core
-  (Phases 0–4 + 10–11) is complete and passing.
+- The rate limiter is in-memory, so its scope is **per-process** — a
+  multi-instance deployment would back it with Redis. It's application-layer
+  abuse detection, not volumetric DDoS mitigation (that's a load-balancer /
+  WAF concern).
+- Dev secrets ship as env-overridable defaults (`JWT_SECRET`,
+  `INTERNAL_KEY`) — obviously change them outside local dev.
+- The demo script asserts the security layer too: anonymous → 401, viewer
+  publishing → 403, NoSQL injection neutralized, rate-limit hammer → 429 with
+  `Retry-After`.
 
 ## Phase status (PRD §13)
 
@@ -155,4 +221,6 @@ WS   /ws/epoch                        — epoch pub/sub for site agents
 | 6 | Hash-chained ledger + verify endpoint | ✅ |
 | 10 | Dashboard (watermarks/epoch, order submit, chaos, ledger) | ✅ |
 | 11 | Demo scenario scripting | ✅ |
-| 7–9 | JWT auth, RBAC, sanitization, rate limiting | ⬜ next |
+| 7 | JWT auth + refresh rotation + theft detection | ✅ |
+| 8 | RBAC + sanitization middleware pipeline | ✅ |
+| 9 | Rate limiting + abuse detection | ✅ |

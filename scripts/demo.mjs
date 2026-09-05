@@ -33,6 +33,33 @@ async function jfetch(url, init) {
   return body;
 }
 
+// ── Auth helper: login, keep token refreshed, attach Authorization ──────────
+let accessToken = null;
+let refreshToken = null;
+
+async function login(username, password) {
+  const body = await jfetch(`${CENTRAL}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  return body;
+}
+
+async function authedFetch(url, init = {}) {
+  const headers = { ...(init.headers ?? {}), authorization: `Bearer ${accessToken}` };
+  const res = await fetch(url, { ...init, headers });
+  if (res.status === 401) throw new Error('token expired mid-demo (unexpected — TTL is 15min)');
+  return res;
+}
+
+async function authedJson(url, init = {}) {
+  const res = await authedFetch(url, init);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${res.status} ${JSON.stringify(body)}`);
+  return body;
+}
+
 async function waitUntil(desc, fn, timeoutMs = 30000, intervalMs = 250) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -48,7 +75,7 @@ async function main() {
   log('  Distributed Clinical Reference-Data Consistency — Demo');
   log('══════════════════════════════════════════════════════════════\n');
 
-  // ── 0. Health checks ────────────────────────────────────────────────────────
+  // ── 0. Health checks + auth ────────────────────────────────────────────────────
   log('[0] Waiting for services to be healthy...');
   const healthy = await waitUntil('services healthy', async () => {
     try {
@@ -60,14 +87,35 @@ async function main() {
   if (!healthy) return;
   ok('central + coordinator healthy');
 
-  const sites = await jfetch(`${CENTRAL}/api/sites`);
+  log('    logging in as admin (JWT + refresh token)...');
+  const session = await login('admin', 'admin123');
+  accessToken = session.accessToken;
+  refreshToken = session.refreshToken;
+  ok(`authenticated as ${session.username} (role=${session.role}, access TTL=${session.expiresInSec}s)`);
+
+  // RBAC: viewer must NOT be able to publish
+  const viewerSession = await login('viewer', 'viewer123');
+  const viewerAttempt = await fetch(`${CENTRAL}/api/reference/rules`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${viewerSession.accessToken}` },
+    body: JSON.stringify({ ruleId: 'x', payload: {} }),
+  });
+  if (viewerAttempt.status === 403) ok('RBAC enforced: viewer denied reference:publish (403)');
+  else fail(`RBAC FAILED: viewer got ${viewerAttempt.status} on publish`);
+
+  // Unauthenticated request must be rejected
+  const anonAttempt = await fetch(`${CENTRAL}/api/reference/rules`);
+  if (anonAttempt.status === 401) ok('JWT enforced: unauthenticated request rejected (401)');
+  else fail(`JWT FAILED: anonymous got ${anonAttempt.status}`);
+
+  const sites = await authedJson(`${CENTRAL}/api/sites`);
   const siteIds = sites.map((s) => s.siteId);
   log(`    sites: ${siteIds.join(', ')}`);
   if (siteIds.length < 2) { fail('need at least 2 sites'); return; }
 
   // ── 1. Baseline: publish V1 (no interaction) ────────────────────────────────
   log('\n[1] Publishing V1: warfarin+aspirin → NO interaction (baseline)...');
-  const v1 = await jfetch(`${CENTRAL}/api/reference/rules`, {
+  const v1 = await authedJson(`${CENTRAL}/api/reference/rules`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -77,19 +125,19 @@ async function main() {
   });
   log(`    published globalSeq=${v1.globalSeq} (V1)`);
   const convergedOnV1 = await waitUntil('all sites cached V1', async () => {
-    const wms = await jfetch(`${COORD}/api/sites`);
+    const wms = await authedJson(`${COORD}/api/sites`);
     return wms.watermarks.length >= siteIds.length &&
       wms.watermarks.every((w) => w.watermarkSeq >= v1.globalSeq);
   });
   if (!convergedOnV1) return;
-  const epoch1 = await jfetch(`${COORD}/api/epoch`);
+  const epoch1 = await authedJson(`${COORD}/api/epoch`);
   ok(`all sites cached V1; epoch=${epoch1.epochSeq}`);
   if (epoch1.epochSeq < v1.globalSeq) fail(`epoch should be >= ${v1.globalSeq}`);
 
   // ── 2. Chaos: slow down Site B ──────────────────────────────────────────────
   const slowSite = siteIds[1];
   log(`\n[2] Injecting chaos: ${slowSite} baseLatency=4000ms (Site A stays fast)...`);
-  await jfetch(`${CENTRAL}/api/sites/${slowSite}/network`, {
+  await authedJson(`${CENTRAL}/api/sites/${slowSite}/network`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ baseLatencyMs: 4000, jitterMs: 200, dropRate: 0 }),
@@ -98,7 +146,7 @@ async function main() {
 
   // ── 3. Publish V2 — watch epoch stay at V1 ──────────────────────────────────
   log('\n[3] Publishing V2: warfarin+aspirin → SEVERE interaction...');
-  const v2 = await jfetch(`${CENTRAL}/api/reference/rules`, {
+  const v2 = await authedJson(`${CENTRAL}/api/reference/rules`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -110,15 +158,15 @@ async function main() {
 
   // Wait for the FAST site to have V2 cached while the SLOW site doesn't.
   const gapAchieved = await waitUntil('fast site ahead, slow site behind', async () => {
-    const wms = await jfetch(`${COORD}/api/sites`);
+    const wms = await authedJson(`${COORD}/api/sites`);
     const fast = wms.watermarks.find((w) => w.siteId === siteIds[0]);
     const slow = wms.watermarks.find((w) => w.siteId === slowSite);
     return fast && slow && fast.watermarkSeq >= v2.globalSeq && slow.watermarkSeq < v2.globalSeq;
   }, 15000);
   if (!gapAchieved) return;
 
-  const wmsDuringGap = await jfetch(`${COORD}/api/sites`);
-  const epochDuringGap = await jfetch(`${COORD}/api/epoch`);
+  const wmsDuringGap = await authedJson(`${COORD}/api/sites`);
+  const epochDuringGap = await authedJson(`${COORD}/api/epoch`);
   log('    watermarks during gap:', wmsDuringGap.watermarks.map((w) => `${w.siteId}=${w.watermarkSeq}`).join(' '));
   ok(`DEMONSTRABLY OUT OF SYNC: fast site has V2 (seq ${v2.globalSeq}), slow site still at ${wmsDuringGap.watermarks.find((w) => w.siteId === slowSite)?.watermarkSeq}`);
   if (epochDuringGap.epochSeq >= v2.globalSeq) {
@@ -129,7 +177,7 @@ async function main() {
 
   // ── 4. THE TEST: identical order during the gap ──────────────────────────────
   log('\n[4] Submitting IDENTICAL order to ALL sites DURING the propagation gap...');
-  const order1 = await jfetch(`${CENTRAL}/api/orders`, {
+  const order1 = await authedJson(`${CENTRAL}/api/orders`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -159,16 +207,16 @@ async function main() {
   // ── 5. Wait for convergence; epoch advances atomically ───────────────────────
   log('\n[5] Waiting for slow site to catch up (epoch should advance atomically)...');
   const converged = await waitUntil('epoch advanced to V2', async () => {
-    const e = await jfetch(`${COORD}/api/epoch`);
+    const e = await authedJson(`${COORD}/api/epoch`);
     return e.epochSeq >= v2.globalSeq;
   }, 30000);
   if (!converged) return;
-  const epoch2 = await jfetch(`${COORD}/api/epoch`);
+  const epoch2 = await authedJson(`${COORD}/api/epoch`);
   ok(`epoch advanced ${epoch1.epochSeq} → ${epoch2.epochSeq} for ALL sites at once`);
 
   // ── 6. Re-submit: both sites flip to V2 together ─────────────────────────────
   log('\n[6] Re-submitting the IDENTICAL order after convergence...');
-  const order2 = await jfetch(`${CENTRAL}/api/orders`, {
+  const order2 = await authedJson(`${CENTRAL}/api/orders`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -187,14 +235,51 @@ async function main() {
 
   // ── 7. Ledger integrity ──────────────────────────────────────────────────────
   log('\n[7] Verifying audit ledger chain...');
-  const verify = await jfetch(`${CENTRAL}/api/audit/verify`);
+  const verify = await authedJson(`${CENTRAL}/api/audit/verify`);
   if (verify.valid) ok(`ledger valid — ${verify.blocksChecked} blocks, hash chain intact`);
   else fail(`ledger TAMPERED at block ${verify.firstBadIndex}: ${verify.reason}`);
 
-  const audit = await jfetch(`${CENTRAL}/api/audit?limit=200`);
+  const audit = await authedJson(`${CENTRAL}/api/audit?limit=200`);
   const counts = {};
   for (const b of audit.blocks) counts[b.eventType] = (counts[b.eventType] ?? 0) + 1;
   log('    ledger event counts:', JSON.stringify(counts));
+
+  // ── 8. Input sanitization + rate limiting + abuse detection ─────────────────
+  log('\n[8] Security: NoSQL operator injection, then rate limiting...');
+
+  // NoSQL operator injection must be neutralized by the sanitizer (run FIRST —
+  // before the rate-limit hammering trips the per-IP limit on /api/auth/login)
+  const injection = await fetch(`${CENTRAL}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: { $ne: null }, password: { $gt: '' } }),
+  });
+  const injBody = await injection.json().catch(() => ({}));
+  if (injection.status === 400 && typeof injBody.error === 'string') {
+    ok('NoSQL operator injection neutralized: $-keys stripped, request rejected');
+  } else if (injection.status === 401) {
+    ok('NoSQL operator injection neutralized: sanitized to invalid credentials (401)');
+  } else {
+    fail(`sanitizer FAILED: injection got ${injection.status}`);
+  }
+
+  log('    hammering /api/auth/login (limit 10/min per IP)...');
+  let got429 = false;
+  let retryAfter = null;
+  for (let i = 0; i < 14; i++) {
+    const r = await fetch(`${CENTRAL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'nobody', password: 'wrong' }),
+    });
+    if (r.status === 429) {
+      got429 = true;
+      retryAfter = r.headers.get('retry-after');
+      break;
+    }
+  }
+  if (got429) ok(`rate limiter engaged: 429 with Retry-After=${retryAfter}s (per-IP sliding window)`);
+  else fail('rate limiter did not engage on /api/auth/login');
 
   // ── Summary ──────────────────────────────────────────────────────────────────
   log('\n══════════════════════════════════════════════════════════════');
@@ -207,6 +292,8 @@ async function main() {
     log('  - epoch held at V1 during gap, advanced atomically after convergence');
     log('  - deterministic switch to V2 at all sites together');
     log('  - hash-chained ledger verified');
+    log('  - JWT auth + RBAC enforced (viewer denied publish, anonymous rejected)');
+    log('  - rate limiter engaged with Retry-After; operator injection neutralized');
   }
   log('══════════════════════════════════════════════════════════════\n');
 }

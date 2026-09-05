@@ -10,7 +10,9 @@
   },
   "dependencies": {
     "@hc/shared": "*",
-    "express": "^4.21.2"
+    "cors": "^2.8.6",
+    "express": "^4.21.2",
+    "helmet": "^8.3.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

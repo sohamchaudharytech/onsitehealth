@@ -27,6 +27,13 @@ interface LiveEventMsg {
   ts: string;
 }
 
+interface Session {
+  accessToken: string;
+  refreshToken: string;
+  role: string;
+  username: string;
+}
+
 const SEVERITY_CLASS: Record<string, string> = {
   NONE: 'none',
   LOW: 'low',
@@ -35,7 +42,106 @@ const SEVERITY_CLASS: Record<string, string> = {
   CRITICAL: 'critical',
 };
 
+/**
+ * Authenticated fetch with automatic refresh-token rotation on 401.
+ * Single-flight: concurrent 401s share ONE in-flight refresh call — otherwise
+ * parallel requests race, each rotates the refresh token, and the reuse of an
+ * already-rotated token trips theft detection (family revocation).
+ */
+let inflightRefresh: Promise<Session | null> | null = null;
+
+async function refreshSession(session: Session): Promise<Session | null> {
+  if (!inflightRefresh) {
+    inflightRefresh = (async () => {
+      try {
+        const r = await fetch('/api/auth/refresh', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ refreshToken: session.refreshToken }),
+        });
+        if (!r.ok) return null;
+        const next = await r.json();
+        return {
+          accessToken: next.accessToken,
+          refreshToken: next.refreshToken,
+          role: next.role,
+          username: next.username,
+        } satisfies Session;
+      } catch {
+        return null;
+      } finally {
+        // allow a future refresh once this one settles
+        setTimeout(() => { inflightRefresh = null; }, 0);
+      }
+    })();
+  }
+  return inflightRefresh;
+}
+
+async function api(session: Session, setSession: (s: Session) => void, url: string, init: RequestInit = {}): Promise<Response> {
+  const doFetch = (token: string) =>
+    fetch(url, { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}` } });
+  let res = await doFetch(session.accessToken);
+  if (res.status === 401) {
+    // access token expired — rotate the refresh token once (shared across concurrent callers)
+    const next = await refreshSession(session);
+    if (next) {
+      setSession(next);
+      res = await doFetch(next.accessToken);
+    }
+  }
+  return res;
+}
+
+function Login({ onLogin }: { onLogin: (s: Session) => void }) {
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('admin123');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: username.trim(), password }),
+      });
+      const body = await r.json();
+      if (!r.ok) {
+        setError(body.error ?? 'login failed');
+        return;
+      }
+      onLogin(body);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="app" style={{ maxWidth: 420, paddingTop: 80 }}>
+      <h1>Clinical Reference-Data Consistency</h1>
+      <div className="subtitle">Sign in to view the live multi-site consistency dashboard</div>
+      <form className="panel" onSubmit={submit}>
+        <h2>Sign in</h2>
+        <div className="row" style={{ flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
+          <input placeholder="username" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
+          <input placeholder="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+          <button className="primary" type="submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+          {error && <div className="err" style={{ fontSize: 13 }}>{error}</div>}
+        </div>
+        <div className="footer-note" style={{ marginTop: 12 }}>
+          Demo accounts — admin/admin123 · operator/operator123 · auditor/auditor123 · viewer/viewer123
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function App() {
+  const [session, setSession] = useState<Session | null>(null);
   const [sites, setSites] = useState<SiteState[]>([]);
   const [epoch, setEpoch] = useState<{ epochSeq: number; updatedAt: string }>({ epochSeq: 0, updatedAt: '' });
   const [events, setEvents] = useState<LiveEventMsg[]>([]);
@@ -47,11 +153,12 @@ function App() {
   const [chaosLatency, setChaosLatency] = useState(4000);
 
   const refresh = async () => {
+    if (!session) return;
     try {
       const [sitesRes, wmRes, epochRes] = await Promise.all([
-        fetch('/api/sites').then((r) => r.json()),
-        fetch('/api/watermarks').then((r) => r.json()),
-        fetch('/api/epoch').then((r) => r.json()),
+        api(session, setSession, '/api/sites').then((r) => r.json()),
+        api(session, setSession, '/api/watermarks').then((r) => r.json()),
+        api(session, setSession, '/api/epoch').then((r) => r.json()),
       ]);
       const wmById = new Map(
         (wmRes.watermarks ?? []).map((w: { siteId: string; watermarkSeq: number }) => [w.siteId, w.watermarkSeq]),
@@ -73,8 +180,10 @@ function App() {
   };
 
   useEffect(() => {
+    if (!session) return;
     void refresh();
-    const ws = new WebSocket(`ws://${location.host}/ws/live`);
+    // JWT via query param — browsers can't set WS headers
+    const ws = new WebSocket(`ws://${location.host}/ws/live?token=${encodeURIComponent(session.accessToken)}`);
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data) as LiveEventMsg;
@@ -91,12 +200,18 @@ function App() {
     };
     const iv = setInterval(refresh, 3000);
     return () => { clearInterval(iv); ws.close(); };
-  }, []);
+  }, [session?.accessToken]);
+
+  const canPublish = session?.role === 'admin';
+  const canChaos = session?.role === 'admin';
+  const canOrder = session?.role === 'admin' || session?.role === 'operator';
+  const canAudit = session?.role === 'admin' || session?.role === 'auditor';
 
   const publishV2 = async () => {
+    if (!session) return;
     setPublishing(true);
     try {
-      await fetch('/api/reference/rules', {
+      await api(session, setSession, '/api/reference/rules', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -108,9 +223,10 @@ function App() {
   };
 
   const submitOrder = async () => {
+    if (!session) return;
     setSubmitting(true);
     try {
-      const res = await fetch('/api/orders', {
+      const res = await api(session, setSession, '/api/orders', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -125,7 +241,8 @@ function App() {
   };
 
   const injectChaos = async () => {
-    await fetch(`/api/sites/${chaosSite}/network`, {
+    if (!session) return;
+    await api(session, setSession, `/api/sites/${chaosSite}/network`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ baseLatencyMs: chaosLatency, jitterMs: 200, dropRate: 0 }),
@@ -134,16 +251,36 @@ function App() {
   };
 
   const verifyLedger = async () => {
-    const res = await fetch('/api/audit/verify').then((r) => r.json());
+    if (!session) return;
+    const res = await api(session, setSession, '/api/audit/verify').then((r) => r.json());
     setLedgerStatus(res.valid ? `✅ chain valid (${res.blocksChecked} blocks)` : `❌ TAMPERED at block ${res.firstBadIndex}: ${res.reason}`);
+  };
+
+  const logout = async () => {
+    if (session) {
+      await api(session, setSession, '/api/auth/logout', { method: 'POST' }).catch(() => undefined);
+    }
+    setSession(null);
+    setSites([]);
+    setEvents([]);
+    setLastOrder(null);
   };
 
   const allMatch = lastOrder && lastOrder.results.length > 1 &&
     lastOrder.results.every((r) => r.fires === lastOrder.results[0].fires && r.severity === lastOrder.results[0].severity && r.epochUsed === lastOrder.results[0].epochUsed);
 
+  if (!session) {
+    return <Login onLogin={setSession} />;
+  }
+
   return (
     <div className="app">
-      <h1>Distributed Clinical Reference-Data Consistency</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h1>Distributed Clinical Reference-Data Consistency</h1>
+        <div style={{ fontSize: 13, color: 'var(--muted)' }}>
+          {session.username} ({session.role}) · <button onClick={logout} style={{ padding: '4px 10px' }}>Sign out</button>
+        </div>
+      </div>
       <div className="subtitle">
         Identical orders evaluated at multiple sites always see the same reference snapshot — even while propagation is mid-flight.
       </div>
@@ -163,15 +300,15 @@ function App() {
         <div className="panel">
           <h2>Actions</h2>
           <div className="controls">
-            <button className="primary" onClick={publishV2} disabled={publishing}>Publish V2 (severe interaction)</button>
-            <button onClick={submitOrder} disabled={submitting}>Submit identical order → all sites</button>
+            <button className="primary" onClick={publishV2} disabled={publishing || !canPublish} title={canPublish ? undefined : 'requires admin role'}>Publish V2 (severe interaction)</button>
+            <button onClick={submitOrder} disabled={submitting || !canOrder} title={canOrder ? undefined : 'requires operator+ role'}>Submit identical order → all sites</button>
           </div>
           <div className="controls">
             <select value={chaosSite} onChange={(e) => setChaosSite(e.target.value)}>
               {sites.map((s) => <option key={s.siteId} value={s.siteId}>{s.siteId}</option>)}
             </select>
             <input type="number" value={chaosLatency} onChange={(e) => setChaosLatency(Number(e.target.value))} style={{ width: 90 }} />
-            <button onClick={injectChaos}>Inject latency chaos</button>
+            <button onClick={injectChaos} disabled={!canChaos} title={canChaos ? undefined : 'requires admin role'}>Inject latency chaos</button>
           </div>
         </div>
       </div>
@@ -226,7 +363,7 @@ function App() {
         <div className="panel">
           <h2>Audit ledger</h2>
           <div className="controls">
-            <button onClick={verifyLedger}>Run integrity check</button>
+            <button onClick={verifyLedger} disabled={!canAudit} title={canAudit ? undefined : 'requires auditor+ role'}>Run integrity check</button>
           </div>
           <div style={{ fontSize: 13 }}>{ledgerStatus || 'click to walk the hash chain'}</div>
         </div>

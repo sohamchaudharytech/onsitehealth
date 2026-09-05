@@ -1,5 +1,15 @@
 import express from 'express';
-import { type AlertResult, type ClinicalOrder, type LiveEvent, type ReferenceRuleVersion } from '@hc/shared';
+import helmet from 'helmet';
+import {
+  errorHandler,
+  internalKeyGuard,
+  requestLogger,
+  sanitizeBody,
+  type AlertResult,
+  type ClinicalOrder,
+  type LiveEvent,
+  type ReferenceRuleVersion,
+} from '@hc/shared';
 import { retryWithBackoff } from '@hc/shared';
 import { SiteCache } from './cache.js';
 import { EpochGatedEvaluator } from './evaluator.js';
@@ -8,6 +18,7 @@ const SITE_ID = process.env.SITE_ID ?? 'site-a';
 const PORT = Number(process.env.PORT ?? 4101);
 const COORDINATOR_URL = process.env.COORDINATOR_URL ?? 'http://localhost:4002';
 const CENTRAL_URL = process.env.CENTRAL_URL ?? 'http://localhost:4001';
+const INTERNAL_KEY = process.env.INTERNAL_KEY ?? 'dev-internal-key';
 
 const cache = new SiteCache();
 const evaluator = new EpochGatedEvaluator();
@@ -26,7 +37,7 @@ async function ackWatermark(): Promise<void> {
     () =>
       fetch(`${COORDINATOR_URL}/internal/ack`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', 'x-internal-key': INTERNAL_KEY },
         body: JSON.stringify({ siteId: SITE_ID, watermarkSeq: cache.getWatermark() }),
         signal: AbortSignal.timeout(3000),
       }).then((r) => {
@@ -43,7 +54,15 @@ async function ackWatermark(): Promise<void> {
 
 // ── HTTP API ──────────────────────────────────────────────────────────────────
 const app = express();
+app.use(helmet());
 app.use(express.json({ limit: '64kb' }));
+app.use(requestLogger());
+app.use(sanitizeBody);
+
+app.get('/healthz', (_req, res) => res.json({ ok: true, service: 'site-agent', siteId: SITE_ID }));
+
+// All /internal routes are service-to-service: guarded by the shared internal key.
+app.use('/internal', internalKeyGuard(INTERNAL_KEY));
 
 // Central service pushes new rule versions here (through simulated network).
 app.post('/internal/push', (req, res) => {
@@ -99,10 +118,7 @@ app.get('/internal/results/:orderId', (req, res) => {
 
 app.get('/healthz', (_req, res) => res.json({ ok: true, service: 'site-agent', siteId: SITE_ID }));
 
-app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error(`[site-agent ${SITE_ID}] unhandled error:`, err.message);
-  res.status(500).json({ error: 'internal error' });
-});
+app.use(errorHandler(`site-agent ${SITE_ID}`));
 
 const server = app.listen(PORT, () => {
   console.log(`[site-agent] ${SITE_ID} listening on :${PORT}`);
@@ -113,7 +129,7 @@ const { WebSocket } = await import('ws');
 let epochWs: import('ws').WebSocket | null = null;
 
 function connectEpochSubscription(): void {
-  const url = `${COORDINATOR_URL.replace(/^http/, 'ws')}/ws/epoch`;
+  const url = `${COORDINATOR_URL.replace(/^http/, 'ws')}/ws/epoch?key=${encodeURIComponent(INTERNAL_KEY)}`;
   epochWs = new WebSocket(url);
   epochWs.on('open', () => console.log(`[site-agent ${SITE_ID}] subscribed to epoch updates`));
   epochWs.on('message', (raw) => {
@@ -138,7 +154,10 @@ connectEpochSubscription();
 setInterval(() => {
   void (async () => {
     try {
-      const res = await fetch(`${COORDINATOR_URL}/api/epoch`, { signal: AbortSignal.timeout(2000) });
+      const res = await fetch(`${COORDINATOR_URL}/internal/epoch`, {
+        headers: { 'x-internal-key': INTERNAL_KEY },
+        signal: AbortSignal.timeout(2000),
+      });
       if (res.ok) {
         const { epochSeq } = (await res.json()) as { epochSeq: number };
         evaluator.setEpoch(epochSeq);
@@ -152,23 +171,9 @@ setInterval(() => {
 // Initial ACK so the coordinator knows this site exists (watermark 0)
 void ackWatermark();
 
-// Report results to central ledger periodically (batched)
-setInterval(() => {
-  void (async () => {
-    try {
-      const recent = [...results.values()].flat().slice(-10);
-      if (recent.length === 0) return;
-      await fetch(`${CENTRAL_URL}/internal/evaluations`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ siteId: SITE_ID, results: recent }),
-        signal: AbortSignal.timeout(2000),
-      });
-    } catch {
-      /* central down — results stay local */
-    }
-  })();
-}, 2000);
+// (Evaluations are ledgered by the central service at evaluation time —
+// the old batched reporter here re-sent the same results every 2s, which
+// duplicated ORDER_EVALUATED ledger entries.)
 
 // ── WebSocket for dashboard ───────────────────────────────────────────────────
 const { WebSocketServer } = await import('ws');
