@@ -57,7 +57,11 @@ export declare class UserStore {
     } | null;
     /** True if any doctor is affiliated with the given hospital. */
     hasDoctorAtHospital(hospitalId: string): boolean;
-    create(username: string, password: string, role: Role, hospitalId?: string, fullName?: string): UserRecord;
+    create(username: string, password: string, role: Role, hospitalId?: string, fullName?: string, userId?: string): UserRecord;
+    /** Change login username (portal email). Old username is freed. */
+    updateUsername(userId: string, newUsername: string): UserRecord | null;
+    /** Change login password. */
+    updatePassword(userId: string, newPassword: string): UserRecord | null;
     /** Unique-username check (UserStore.create is otherwise silent on collision). */
     usernameTaken(username: string): boolean;
     issueRefreshToken(userId: string): string;

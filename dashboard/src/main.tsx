@@ -75,6 +75,59 @@ interface PublisherView {
   hospitalId?: string | null;
 }
 
+interface PatientDataView {
+  patientRef: string;
+  firstName: string;
+  lastName: string;
+  dob: string;
+  gender: string;
+  disease: string;
+  drugs: string[];
+}
+
+interface PatientViewT {
+  patientId: string;
+  email: string;
+  data: PatientDataView;
+  createdAt: string;
+  createdBy: { userId: string; username: string; role: string } | null;
+  status: 'active' | 'deactivated';
+  hospitalNames?: Array<{ siteId: string; name: string }>;
+  visitCount?: number;
+  history?: PatientChangeBlockView[];
+  visits?: PatientVisitView[];
+}
+
+interface PatientChangeBlockView {
+  seq: number;
+  patientId: string;
+  changedBy: { userId: string; username: string; role: string } | null;
+  changedAt: string;
+  reason: string;
+  changes: Record<string, { before: unknown; after: unknown }>;
+}
+
+interface PatientVisitView {
+  visitId: string;
+  patientId: string;
+  hospitalId: string;
+  hospitalName?: string;
+  visitedAt: string;
+  reason: string;
+  recordedBy: { userId: string; username: string; role: string } | null;
+}
+
+/** Age in years from an ISO dob, as of today. */
+function calcAge(dob: string): number {
+  const d = new Date(dob);
+  if (Number.isNaN(d.getTime())) return 0;
+  const now = new Date();
+  let age = now.getFullYear() - d.getFullYear();
+  const m = now.getMonth() - d.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age--;
+  return age;
+}
+
 const SEVERITY_CLASS: Record<string, string> = {
   NONE: 'none',
   LOW: 'low',
@@ -211,7 +264,7 @@ function Login({ onLogin }: { onLogin: (s: Session) => void }) {
           {error && <div className="err" style={{ fontSize: 13 }}>{error}</div>}
         </div>
         <div className="footer-note" style={{ marginTop: 12 }}>
-          Demo accounts — admin/admin123 · operator/operator123 · auditor/auditor123 · viewer/viewer123 · doctor/doctor123
+          Demo accounts — admin/admin123 · operator/operator123 · auditor/auditor123 · viewer/viewer123 · doctor/doctor123 · patient: ava.thompson@demo.health / patient12345
         </div>
       </form>
     </div>
@@ -225,6 +278,125 @@ interface RuleVersionView {
   payload: { drugA?: string; drugB?: string; severity?: string; note?: string };
   createdAt: string;
   publishedBy?: PublisherView;
+}
+
+/**
+ * Patient portal — strictly read-only personal health view. The patient logs
+ * in with the email/password their doctor/admin provided and sees their
+ * demographics (with calculated age), disease, drugs, hospital visits, and
+ * the full change history of their record. No edit controls exist here by
+ * design — only a doctor or admin can change patient data.
+ */
+function PatientPortal({ session, setSession, onLogout }: { session: Session; setSession: (s: Session) => void; onLogout: () => void }) {
+  const [me, setMe] = useState<PatientViewT | null>(null);
+  const [error, setError] = useState('');
+
+  const refresh = async () => {
+    try {
+      const res = await api(session, setSession, '/api/patients/me');
+      const body = await res.json();
+      if (res.ok) setMe(body);
+      else setError(body.error ?? 'could not load your record');
+    } catch {
+      setError('services starting up — try again shortly');
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    const iv = setInterval(refresh, 10000);
+    return () => clearInterval(iv);
+  }, [session?.accessToken]);
+
+  const d = me?.data;
+
+  return (
+    <div className="app" style={{ maxWidth: 900 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h1>My Health Record</h1>
+        <div style={{ fontSize: 13, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <ThemeToggle />
+          <span>{session.username} ·</span>
+          <button onClick={onLogout} style={{ padding: '4px 10px' }}>Sign out</button>
+        </div>
+      </div>
+      <div className="subtitle">Your information is read-only. Only your doctor or an administrator can change it — every change is permanently recorded.</div>
+
+      {error && <div className="panel"><div className="err">{error}</div></div>}
+      {!me && !error && <div className="panel"><h2>Loading your record…</h2></div>}
+
+      {me && d && (
+        <>
+          <div className="grid cols-2" style={{ marginBottom: 16 }}>
+            <div className="panel">
+              <h2>Personal information</h2>
+              <div className="row"><span className="k">patient ID</span><span style={{ fontFamily: 'ui-monospace, monospace' }}>{d.patientRef}</span></div>
+              <div className="row"><span className="k">first name</span><span>{d.firstName}</span></div>
+              <div className="row"><span className="k">last name</span><span>{d.lastName}</span></div>
+              <div className="row"><span className="k">date of birth</span><span>{d.dob} (age {calcAge(d.dob)})</span></div>
+              <div className="row"><span className="k">gender</span><span>{d.gender}</span></div>
+              <div className="row"><span className="k">record created</span><span className="muted">{me.createdAt.slice(0, 19).replace('T', ' ')}</span></div>
+            </div>
+            <div className="panel">
+              <h2>Condition & medication</h2>
+              <div className="row"><span className="k">disease</span><span>{d.disease}</span></div>
+              <div className="row" style={{ alignItems: 'flex-start' }}>
+                <span className="k">drugs / medicine</span>
+                <span style={{ textAlign: 'right' }}>
+                  {d.drugs.length > 0
+                    ? d.drugs.map((drug) => <span key={drug} className="badge low" style={{ display: 'inline-block', margin: '2px 0 2px 6px' }}>{drug}</span>)
+                    : <span className="muted">none</span>}
+                </span>
+              </div>
+              <div className="row"><span className="k">status</span><span>{me.status === 'active' ? <span className="ok">active</span> : <span className="err">deactivated</span>}</span></div>
+            </div>
+          </div>
+
+          <div className="panel" style={{ marginBottom: 16 }}>
+            <h2>Hospitals I visited</h2>
+            <table>
+              <thead><tr><th>hospital</th><th>when</th><th>reason</th><th>recorded by</th></tr></thead>
+              <tbody>
+                {(me.visits ?? []).map((v) => (
+                  <tr key={v.visitId}>
+                    <td>{v.hospitalName ?? v.hospitalId}</td>
+                    <td className="muted">{v.visitedAt.slice(0, 19).replace('T', ' ')}</td>
+                    <td>{v.reason}</td>
+                    <td className="muted">{v.recordedBy?.username ?? '—'}</td>
+                  </tr>
+                ))}
+                {(me.visits ?? []).length === 0 && <tr><td colSpan={4} style={{ color: 'var(--muted)' }}>no visits recorded</td></tr>}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="panel">
+            <h2>Change history of my record</h2>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+              Nothing is ever deleted — every change to your record is kept as a permanent history block.
+            </div>
+            <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+              <table>
+                <thead><tr><th>when</th><th>changed by</th><th>field</th><th>before → after</th><th>reason</th></tr></thead>
+                <tbody>
+                  {(me.history ?? []).slice().reverse().map((b) => Object.entries(b.changes).map(([field, ch]) => (
+                    <tr key={`${b.seq}-${field}`}>
+                      <td className="muted">{b.changedAt.slice(0, 19).replace('T', ' ')}</td>
+                      <td>{b.changedBy?.username ?? 'system'} <span className="muted">({b.changedBy?.role})</span></td>
+                      <td>{field}</td>
+                      <td><span className="warn">{JSON.stringify(ch.before)}</span> → <span className="ok">{JSON.stringify(ch.after)}</span></td>
+                      <td className="muted">{b.reason}</td>
+                    </tr>
+                  )))}
+                  {(me.history ?? []).length === 0 && <tr><td colSpan={5} style={{ color: 'var(--muted)' }}>no changes recorded yet</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -680,9 +852,327 @@ function DoctorPage({ session, setSession, onLogout, onOpenHospital }: { session
         </div>
       </div>
 
+      <PatientsPanel session={session} setSession={setSession} />
+
       <div className="footer-note">
         Every update is versioned and hash-chained into the audit ledger. Hospital sites cache new versions as they arrive but evaluate only against the global active epoch (min watermark across all sites) — guaranteeing identical alerts at every hospital.
       </div>
+    </div>
+  );
+}
+
+/**
+ * Patients panel — shared by the admin dashboard and doctor portal.
+ * Doctors/admins create patients (with portal login), edit any field
+ * (every change is history-blocked, nothing hard-deleted), record hospital
+ * visits, deactivate/reactivate, and inspect the full change history.
+ */
+function PatientsPanel({ session, setSession }: { session: Session; setSession: (s: Session) => void }) {
+  const [patientsList, setPatientsList] = useState<PatientViewT[]>([]);
+  const [allHospitals, setAllHospitals] = useState<HospitalView[]>([]);
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<PatientViewT | null>(null);
+  // create form
+  const [pFirst, setPFirst] = useState('');
+  const [pLast, setPLast] = useState('');
+  const [pDob, setPDob] = useState('');
+  const [pGender, setPGender] = useState('female');
+  const [pDisease, setPDisease] = useState('');
+  const [pDrugs, setPDrugs] = useState('');
+  const [pEmail, setPEmail] = useState('');
+  const [pPassword, setPPassword] = useState('');
+  const [createError, setCreateError] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [createdCreds, setCreatedCreds] = useState<{ patientRef: string; email: string; password: string } | null>(null);
+  // edit form
+  const [eDisease, setEDisease] = useState('');
+  const [eDrugs, setEDrugs] = useState('');
+  const [eReason, setEReason] = useState('');
+  const [editError, setEditError] = useState('');
+  const [editing, setEditing] = useState(false);
+  // visit form
+  const [vHospital, setVHospital] = useState('');
+  const [vReason, setVReason] = useState('');
+  const [visitError, setVisitError] = useState('');
+  const [visiting, setVisiting] = useState(false);
+
+  const canManage = session.role === 'admin' || session.role === 'doctor';
+
+  const refreshList = async () => {
+    if (!canManage) return;
+    try {
+      const [pRes, hRes] = await Promise.all([
+        api(session, setSession, '/api/patients').then((r) => r.json().then((b) => ({ ok: r.ok, body: b }))),
+        api(session, setSession, '/api/hospitals').then((r) => r.json().then((b) => ({ ok: r.ok, body: b }))),
+      ]);
+      if (pRes.ok) setPatientsList(pRes.body);
+      if (hRes.ok) setAllHospitals(hRes.body);
+    } catch { /* starting up */ }
+  };
+
+  const refreshDetail = async (patientId: string) => {
+    try {
+      const res = await api(session, setSession, `/api/patients/${patientId}`);
+      const body = await res.json();
+      if (res.ok) {
+        setSelected(body);
+        setEDisease(body.data.disease);
+        setEDrugs(body.data.drugs.join(', '));
+      }
+    } catch { /* starting up */ }
+  };
+
+  useEffect(() => {
+    void refreshList();
+    const iv = setInterval(refreshList, 8000);
+    return () => clearInterval(iv);
+  }, [session?.accessToken]);
+
+  useEffect(() => {
+    if (selected) void refreshDetail(selected.patientId);
+  }, [selected?.patientId]);
+
+  const createPatient = async () => {
+    if (!pFirst.trim() || !pLast.trim()) { setCreateError('first and last name are required'); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(pDob)) { setCreateError('date of birth must be YYYY-MM-DD'); return; }
+    if (!pEmail.includes('@')) { setCreateError('a valid portal email is required'); return; }
+    if (pPassword.length < 8) { setCreateError('portal password must be at least 8 characters'); return; }
+    setCreating(true);
+    setCreateError('');
+    try {
+      const res = await api(session, setSession, '/api/patients', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          firstName: pFirst,
+          lastName: pLast,
+          dob: pDob,
+          gender: pGender,
+          disease: pDisease,
+          drugs: pDrugs.split(',').map((s) => s.trim()).filter(Boolean),
+          email: pEmail,
+          password: pPassword,
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) { setCreateError(body.error ?? 'failed to create patient'); return; }
+      setCreatedCreds({ patientRef: body.data.patientRef, email: pEmail, password: pPassword });
+      setPFirst(''); setPLast(''); setPDob(''); setPDisease(''); setPDrugs(''); setPEmail(''); setPPassword('');
+      void refreshList();
+    } finally { setCreating(false); }
+  };
+
+  const saveEdit = async () => {
+    if (!selected) return;
+    setEditing(true);
+    setEditError('');
+    try {
+      const res = await api(session, setSession, `/api/patients/${selected.patientId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          disease: eDisease,
+          drugs: eDrugs.split(',').map((s) => s.trim()).filter(Boolean),
+          reason: eReason || undefined,
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) { setEditError(body.error ?? 'update failed'); return; }
+      setEReason('');
+      void refreshDetail(selected.patientId);
+      void refreshList();
+    } finally { setEditing(false); }
+  };
+
+  const recordVisit = async () => {
+    if (!selected || !vHospital) { setVisitError('choose a hospital'); return; }
+    setVisiting(true);
+    setVisitError('');
+    try {
+      const res = await api(session, setSession, `/api/patients/${selected.patientId}/visits`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ hospitalId: vHospital, reason: vReason || 'visit' }),
+      });
+      const body = await res.json();
+      if (!res.ok) { setVisitError(body.error ?? 'failed to record visit'); return; }
+      setVReason('');
+      void refreshDetail(selected.patientId);
+      void refreshList();
+    } finally { setVisiting(false); }
+  };
+
+  const setStatus = async (action: 'deactivate' | 'reactivate') => {
+    if (!selected) return;
+    await api(session, setSession, `/api/patients/${selected.patientId}/${action}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: `${action}d from dashboard` }),
+    });
+    void refreshDetail(selected.patientId);
+    void refreshList();
+  };
+
+  if (!canManage) return null;
+
+  const q = search.trim().toLowerCase();
+  const filtered = q
+    ? patientsList.filter((p) =>
+        `${p.data.patientRef} ${p.data.firstName} ${p.data.lastName} ${p.data.disease} ${p.email} ${p.data.drugs.join(' ')}`.toLowerCase().includes(q))
+    : patientsList;
+
+  return (
+    <div className="panel" style={{ marginBottom: 16 }}>
+      <h2>Patients ({filtered.length}{filtered.length !== patientsList.length ? ` of ${patientsList.length}` : ''})</h2>
+
+      {createdCreds && (
+        <div className="panel" style={{ marginBottom: 12, borderColor: 'var(--green)' }}>
+          <h2>Patient created — portal credentials (shown once)</h2>
+          <div className="event-log">
+            <div>{createdCreds.patientRef} — login email: <b>{createdCreds.email}</b> / password: <b>{createdCreds.password}</b></div>
+          </div>
+          <button style={{ marginTop: 8 }} onClick={() => setCreatedCreds(null)}>close</button>
+        </div>
+      )}
+
+      <div className="grid cols-2">
+        <div>
+          <h2>Create patient (with portal login)</h2>
+          <div className="row" style={{ flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
+            <div className="row" style={{ gap: 8 }}>
+              <input placeholder="first name" value={pFirst} onChange={(e) => setPFirst(e.target.value)} style={{ flex: 1 }} />
+              <input placeholder="last name" value={pLast} onChange={(e) => setPLast(e.target.value)} style={{ flex: 1 }} />
+            </div>
+            <div className="row" style={{ gap: 8 }}>
+              <input placeholder="date of birth (YYYY-MM-DD)" value={pDob} onChange={(e) => setPDob(e.target.value)} style={{ flex: 1 }} />
+              <select value={pGender} onChange={(e) => setPGender(e.target.value)}>
+                <option value="female">female</option>
+                <option value="male">male</option>
+                <option value="other">other</option>
+                <option value="unspecified">unspecified</option>
+              </select>
+            </div>
+            <input placeholder="disease / condition" value={pDisease} onChange={(e) => setPDisease(e.target.value)} />
+            <input placeholder="drugs (comma-separated)" value={pDrugs} onChange={(e) => setPDrugs(e.target.value)} />
+            <input placeholder="portal login email (e.g. jane.doe@mail.com)" value={pEmail} onChange={(e) => setPEmail(e.target.value)} />
+            <input placeholder="portal password (min 8 chars)" type="password" value={pPassword} onChange={(e) => setPPassword(e.target.value)} />
+            <button className="primary" onClick={createPatient} disabled={creating}>{creating ? 'Creating…' : 'Create patient'}</button>
+            {createError && <div className="err" style={{ fontSize: 13 }}>{createError}</div>}
+          </div>
+        </div>
+
+        <div>
+          <h2>Patient records</h2>
+          <div className="search-row">
+            <input placeholder="search name / ID / disease / drug…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <button style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => setSearch('')}>clear</button>
+          </div>
+          <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+            <table>
+              <thead><tr><th>ID</th><th>name</th><th>age</th><th>disease</th><th>visits</th><th>status</th><th></th></tr></thead>
+              <tbody>
+                {filtered.map((p) => (
+                  <tr key={p.patientId} style={{ cursor: 'pointer' }} onClick={() => void refreshDetail(p.patientId)}>
+                    <td style={{ fontFamily: 'ui-monospace, monospace' }}>{p.data.patientRef}</td>
+                    <td>{p.data.firstName} {p.data.lastName}</td>
+                    <td>{calcAge(p.data.dob)}</td>
+                    <td>{p.data.disease}</td>
+                    <td>{p.visitCount ?? 0}</td>
+                    <td>{p.status === 'active' ? <span className="ok">active</span> : <span className="err">deactivated</span>}</td>
+                    <td><button style={{ padding: '2px 8px', fontSize: 11 }} onClick={(e) => { e.stopPropagation(); void refreshDetail(p.patientId); }}>open</button></td>
+                  </tr>
+                ))}
+                {filtered.length === 0 && <tr><td colSpan={7} style={{ color: 'var(--muted)' }}>{patientsList.length === 0 ? 'no patients yet' : 'no patients match the search'}</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {selected && (
+        <div className="panel" style={{ marginTop: 16, borderColor: 'var(--accent)' }}>
+          <h2>{selected.data.patientRef} — {selected.data.firstName} {selected.data.lastName} <span className="badge none" style={{ marginLeft: 8 }}>{selected.status}</span></h2>
+          <div className="grid cols-3">
+            <div>
+              <div className="row"><span className="k">patient ID</span><span style={{ fontFamily: 'ui-monospace, monospace' }}>{selected.data.patientRef}</span></div>
+              <div className="row"><span className="k">DOB / age</span><span>{selected.data.dob} ({calcAge(selected.data.dob)}y)</span></div>
+              <div className="row"><span className="k">gender</span><span>{selected.data.gender}</span></div>
+              <div className="row"><span className="k">portal email</span><span>{selected.email}</span></div>
+              <div className="row"><span className="k">created by</span><span>{selected.createdBy?.username ?? '—'}</span></div>
+              <div className="controls">
+                {selected.status === 'active'
+                  ? <button onClick={() => void setStatus('deactivate')}>deactivate</button>
+                  : <button onClick={() => void setStatus('reactivate')}>reactivate</button>}
+              </div>
+            </div>
+            <div>
+              <h2>Update condition & medication</h2>
+              <div className="row" style={{ flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
+                <input placeholder="disease / condition" value={eDisease} onChange={(e) => setEDisease(e.target.value)} />
+                <input placeholder="drugs (comma-separated)" value={eDrugs} onChange={(e) => setEDrugs(e.target.value)} />
+                <input placeholder="reason for change (recorded in history)" value={eReason} onChange={(e) => setEReason(e.target.value)} />
+                <button className="primary" onClick={saveEdit} disabled={editing}>{editing ? 'Saving…' : 'Save changes'}</button>
+                {editError && <div className="err" style={{ fontSize: 13 }}>{editError}</div>}
+                <div style={{ fontSize: 11, color: 'var(--muted)' }}>Every change is stored as a permanent history block — before and after values.</div>
+              </div>
+            </div>
+            <div>
+              <h2>Record hospital visit</h2>
+              <div className="row" style={{ flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
+                <select value={vHospital} onChange={(e) => setVHospital(e.target.value)}>
+                  <option value="">choose hospital…</option>
+                  {allHospitals.map((h) => <option key={h.siteId} value={h.siteId}>{h.name} ({h.siteId})</option>)}
+                </select>
+                <input placeholder="reason for visit" value={vReason} onChange={(e) => setVReason(e.target.value)} />
+                <button className="primary" onClick={recordVisit} disabled={visiting}>{visiting ? 'Recording…' : 'Record visit'}</button>
+                {visitError && <div className="err" style={{ fontSize: 13 }}>{visitError}</div>}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid cols-2" style={{ marginTop: 12 }}>
+            <div>
+              <h2>Visits ({(selected.visits ?? []).length})</h2>
+              <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+                <table>
+                  <thead><tr><th>hospital</th><th>when</th><th>reason</th><th>by</th></tr></thead>
+                  <tbody>
+                    {(selected.visits ?? []).map((v) => (
+                      <tr key={v.visitId}>
+                        <td>{v.hospitalName ?? v.hospitalId}</td>
+                        <td className="muted">{v.visitedAt.slice(0, 19).replace('T', ' ')}</td>
+                        <td>{v.reason}</td>
+                        <td className="muted">{v.recordedBy?.username ?? '—'}</td>
+                      </tr>
+                    ))}
+                    {(selected.visits ?? []).length === 0 && <tr><td colSpan={4} style={{ color: 'var(--muted)' }}>no visits recorded</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div>
+              <h2>Change history (blocks)</h2>
+              <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+                <table>
+                  <thead><tr><th>when</th><th>by</th><th>field</th><th>before → after</th><th>reason</th></tr></thead>
+                  <tbody>
+                    {(selected.history ?? []).slice().reverse().map((b) => Object.entries(b.changes).map(([field, ch]) => (
+                      <tr key={`${b.seq}-${field}`}>
+                        <td className="muted">{b.changedAt.slice(0, 19).replace('T', ' ')}</td>
+                        <td>{b.changedBy?.username ?? 'system'}</td>
+                        <td>{field}</td>
+                        <td><span className="warn">{JSON.stringify(ch.before)}</span> → <span className="ok">{JSON.stringify(ch.after)}</span></td>
+                        <td className="muted">{b.reason}</td>
+                      </tr>
+                    )))}
+                    {(selected.history ?? []).length === 0 && <tr><td colSpan={5} style={{ color: 'var(--muted)' }}>no changes yet</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1252,6 +1742,10 @@ function App() {
     return <DoctorPage session={session} setSession={setSession} onLogout={logout} onOpenHospital={(siteId) => setViewingHospital(siteId)} />;
   }
 
+  if (session.role === 'patient') {
+    return <PatientPortal session={session} setSession={setSession} onLogout={logout} />;
+  }
+
   return (
     <div className="app">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1267,6 +1761,7 @@ function App() {
       </div>
 
       {canAdminManage && <AdminSection session={session} setSession={setSession} onRefresh={() => void refresh()} onOpenHospital={(siteId) => setViewingHospital(siteId)} />}
+      {(session.role === 'admin' || session.role === 'doctor') && <PatientsPanel session={session} setSession={setSession} />}
 
       <div className="grid cols-3" style={{ marginBottom: 16 }}>
         <div className="panel">

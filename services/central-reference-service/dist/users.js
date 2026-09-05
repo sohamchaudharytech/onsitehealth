@@ -59,17 +59,38 @@ export class UserStore {
         }
         return false;
     }
-    create(username, password, role, hospitalId, fullName) {
-        const userId = `user-${newOpaqueToken().slice(0, 12)}`;
+    create(username, password, role, hospitalId, fullName, userId) {
+        const id = userId ?? `user-${newOpaqueToken().slice(0, 12)}`;
         const rec = {
-            userId,
+            userId: id,
             username,
             passwordHash: hashPassword(password),
             role,
             ...(role === 'doctor' ? { hospitalId, fullName } : {}),
         };
-        this.users.set(userId, rec);
-        this.byUsername.set(username, userId);
+        this.users.set(id, rec);
+        this.byUsername.set(username, id);
+        return rec;
+    }
+    /** Change login username (portal email). Old username is freed. */
+    updateUsername(userId, newUsername) {
+        const rec = this.users.get(userId);
+        if (!rec)
+            return null;
+        if (this.byUsername.has(newUsername) && this.byUsername.get(newUsername) !== userId) {
+            throw new Error(`username '${newUsername}' already taken`);
+        }
+        this.byUsername.delete(rec.username);
+        rec.username = newUsername;
+        this.byUsername.set(newUsername, userId);
+        return rec;
+    }
+    /** Change login password. */
+    updatePassword(userId, newPassword) {
+        const rec = this.users.get(userId);
+        if (!rec)
+            return null;
+        rec.passwordHash = hashPassword(newPassword);
         return rec;
     }
     /** Unique-username check (UserStore.create is otherwise silent on collision). */

@@ -1,4 +1,4 @@
-export const ALL_ROLES = ['admin', 'operator', 'auditor', 'viewer', 'doctor'];
+export const ALL_ROLES = ['admin', 'operator', 'auditor', 'viewer', 'doctor', 'patient'];
 /**
  * PRD §7.5 permission matrix. Single source of truth for every service.
  */
@@ -6,11 +6,12 @@ export const PERMISSIONS = {
     'reference:publish': ['admin', 'doctor'],
     'sites:manage': ['admin'],
     'orders:submit': ['admin', 'operator'],
-    'dashboard:view': ['admin', 'operator', 'auditor', 'viewer', 'doctor'],
+    'dashboard:view': ['admin', 'operator', 'auditor', 'viewer', 'doctor', 'patient'],
     'audit:view': ['admin', 'auditor'],
     'users:manage': ['admin'],
     'hospitals:manage': ['admin'],
     'formulary:manage': ['admin', 'doctor'],
+    'patients:manage': ['admin', 'doctor'],
 };
 export function can(role, permission) {
     if (!role)

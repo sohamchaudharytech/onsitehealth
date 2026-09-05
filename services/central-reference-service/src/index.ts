@@ -21,11 +21,13 @@ import {
   type ClinicalOrder,
   type HospitalDrug,
   type LiveEvent,
+  type PatientData,
   type ReferenceRuleVersion,
 } from '@hc/shared';
 import { CentralStore, type SiteRecord } from './store.js';
 import { pushToSite } from './pusher.js';
 import { UserStore } from './users.js';
+import { PatientStore } from './patients.js';
 import {
   generateHospitalName,
   generateRegion,
@@ -75,6 +77,26 @@ const users = new UserStore([
   { userId: 'user-viewer', username: 'viewer', password: 'viewer123', role: 'viewer' },
   { userId: 'user-doctor', username: 'doctor', password: 'doctor123', role: 'doctor', hospitalId: 'site-a', fullName: 'Dr. Demo Physician' },
 ]);
+
+// ── Patient registry (demo seed — one patient so the portal is testable) ─────
+const patients = new PatientStore();
+{
+  const demoData: PatientData = {
+    patientRef: 'P-000123',
+    firstName: 'Ava',
+    lastName: 'Thompson',
+    dob: '1989-04-12',
+    gender: 'female',
+    disease: 'Atrial fibrillation',
+    drugs: ['warfarin', 'aspirin'],
+  };
+  const rec = patients.create(demoData, 'ava.thompson@demo.health', { userId: 'user-admin', username: 'admin', role: 'admin' });
+  users.create('ava.thompson@demo.health', 'patient12345', 'patient', undefined, undefined, `user-${rec.patientId}`);
+  patients.linkUser(rec.patientId, `user-${rec.patientId}`);
+  patients.addVisit(rec.patientId, 'site-a', 'Initial consultation — atrial fibrillation diagnosis', { userId: 'user-doctor', username: 'doctor', role: 'doctor' });
+  ledger.append('PATIENT_CREATED', { patientId: rec.patientId, patientRef: demoData.patientRef, email: rec.email, createdBy: 'admin' });
+  ledger.append('PATIENT_VISIT_RECORDED', { patientId: rec.patientId, patientRef: demoData.patientRef, hospitalId: 'site-a' });
+}
 
 // ── Live event fan-out (dashboard WebSocket clients) ─────────────────────────
 const liveClients = new Set<import('ws').WebSocket>();
@@ -701,6 +723,271 @@ app.delete('/api/hospitals/:siteId/drugs/:drugId', requirePermission('formulary:
   ledger.append('DRUG_REMOVED_FROM_HOSPITAL', { drugId: drug.id, drugName: drug.drugName, hospitalId: drug.hospitalId });
   broadcast({ type: 'DRUG', data: { action: 'removed', drugName: drug.drugName, hospitalId: drug.hospitalId }, ts: new Date().toISOString() });
   res.json({ ok: true });
+});
+
+// ── Patients (admin & doctor manage; patient portal is read-only) ────────────
+// Every mutation lands in TWO places: the append-only PatientChangeBlock
+// history (before/after per field) and the hash-chained ledger. There is NO
+// hard delete — patients are deactivated only, history and visits survive.
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function patientView(p: import('@hc/shared').PatientRecord, hospitals: Map<string, string>): Record<string, unknown> {
+  return {
+    patientId: p.patientId,
+    email: p.email,
+    data: p.data,
+    createdAt: p.createdAt,
+    createdBy: p.createdBy,
+    status: p.status,
+    hospitalNames: [...new Set(patients.visitsOf(p.patientId).map((v) => v.hospitalId))]
+      .map((id) => ({ siteId: id, name: hospitals.get(id) ?? id })),
+  };
+}
+
+interface PatientListRow {
+  patientId: string;
+  email: string;
+  data: PatientData;
+  createdAt: string;
+  createdBy: { userId: string; username: string; role: string } | null;
+  status: string;
+  hospitalNames: Array<{ siteId: string; name: string }>;
+  visitCount: number;
+}
+
+// List + search (patients:manage). Also used by the doctor dashboard.
+app.get('/api/patients', requirePermission('patients:manage'), (req, res) => {
+  const q = String(req.query.search ?? '').trim().toLowerCase();
+  const hospitals = new Map(store.listHospitals().map((h) => [h.siteId, h.name]));
+  const list: PatientListRow[] = patients.list().map((p) => ({
+    patientId: p.patientId,
+    email: p.email,
+    data: p.data,
+    createdAt: p.createdAt,
+    createdBy: p.createdBy,
+    status: p.status,
+    hospitalNames: [...new Set(patients.visitsOf(p.patientId).map((v) => v.hospitalId))]
+      .map((id) => ({ siteId: id, name: hospitals.get(id) ?? id })),
+    visitCount: patients.visitsOf(p.patientId).length,
+  }));
+  const filtered = q
+    ? list.filter((p) => {
+        const text = `${p.data.patientRef} ${p.data.firstName} ${p.data.lastName} ${p.data.disease} ${p.data.gender} ${p.email} ${p.data.drugs.join(' ')}`.toLowerCase();
+        return text.includes(q);
+      })
+    : list;
+  res.json(filtered);
+});
+
+// Create patient + portal login (email/password the admin/doctor provides).
+app.post('/api/patients', requirePermission('patients:manage'), (req, res) => {
+  const { firstName, lastName, dob, gender, disease, drugs, email, password, patientRef } = req.body ?? {};
+  if (typeof firstName !== 'string' || !firstName.trim() || typeof lastName !== 'string' || !lastName.trim()) {
+    res.status(400).json({ error: 'firstName and lastName are required' });
+    return;
+  }
+  if (typeof dob !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dob)) {
+    res.status(400).json({ error: 'dob must be an ISO date (YYYY-MM-DD)' });
+    return;
+  }
+  if (typeof email !== 'string' || !EMAIL_RE.test(email.trim())) {
+    res.status(400).json({ error: 'a valid login email is required' });
+    return;
+  }
+  if (typeof password !== 'string' || password.length < 8) {
+    res.status(400).json({ error: 'portal password (min 8 chars) required' });
+    return;
+  }
+  const mail = email.trim().toLowerCase();
+  if (users.usernameTaken(mail) || patients.getByEmail(mail)) {
+    res.status(409).json({ error: `email '${mail}' is already in use` });
+    return;
+  }
+  const ref = typeof patientRef === 'string' && patientRef.trim() ? patientRef.trim() : patients.allocatePatientRef();
+  if (patients.getByRef(ref)) {
+    res.status(409).json({ error: `patientRef '${ref}' already exists` });
+    return;
+  }
+  const data: PatientData = {
+    patientRef: ref,
+    firstName: firstName.trim(),
+    lastName: lastName.trim(),
+    dob,
+    gender: typeof gender === 'string' && gender.trim() ? gender.trim() : 'unspecified',
+    disease: typeof disease === 'string' && disease.trim() ? disease.trim() : '—',
+    drugs: Array.isArray(drugs) ? drugs.filter((d): d is string => typeof d === 'string' && d.trim().length > 0).map((d) => d.trim()) : [],
+  };
+  const creator = actingUser(req);
+  const rec = patients.create(data, mail, creator);
+  const portalUser = users.create(mail, password, 'patient', undefined, undefined, `user-${rec.patientId}`);
+  patients.linkUser(rec.patientId, portalUser.userId);
+  ledger.append('PATIENT_CREATED', { patientId: rec.patientId, patientRef: ref, email: mail, createdBy: creator?.username ?? 'unknown', data });
+  broadcast({ type: 'PATIENT', data: { action: 'created', patientRef: ref, name: `${data.firstName} ${data.lastName}` }, ts: new Date().toISOString() });
+  res.status(201).json({ ...patientView(rec, new Map(store.listHospitals().map((h) => [h.siteId, h.name]))), password });
+});
+
+// Patient portal: the logged-in patient sees ONLY their own record (read-only).
+// No patients:manage permission — the patient role has none; identity is the gate.
+app.get('/api/patients/me', (req, res) => {
+  if (req.user?.role !== 'patient') {
+    res.status(403).json({ error: 'patient role required' });
+    return;
+  }
+  const rec = patients.get(req.user.userId.replace(/^user-/, ''));
+  if (!rec) {
+    res.status(404).json({ error: 'patient record not found' });
+    return;
+  }
+  if (rec.status !== 'active') {
+    res.status(403).json({ error: 'patient record is deactivated — contact your hospital' });
+    return;
+  }
+  const hospitals = new Map(store.listHospitals().map((h) => [h.siteId, h.name]));
+  res.json({
+    ...patientView(rec, hospitals),
+    visits: patients.visitsOf(rec.patientId).map((v) => ({ ...v, hospitalName: hospitals.get(v.hospitalId) ?? v.hospitalId })),
+    // the patient sees their history too (transparency), read-only anyway
+    history: patients.historyOf(rec.patientId),
+  });
+});
+
+// Patient detail: record + change history + visits (visible to admin/doctor).
+app.get('/api/patients/:patientId', requirePermission('patients:manage'), (req, res) => {
+  const rec = patients.get(req.params.patientId);
+  if (!rec) {
+    res.status(404).json({ error: 'patient not found' });
+    return;
+  }
+  const hospitals = new Map(store.listHospitals().map((h) => [h.siteId, h.name]));
+  res.json({
+    ...patientView(rec, hospitals),
+    history: patients.historyOf(rec.patientId),
+    visits: patients.visitsOf(rec.patientId).map((v) => ({ ...v, hospitalName: hospitals.get(v.hospitalId) ?? v.hospitalId })),
+  });
+});
+
+// Update patient fields (admin/doctor only). Change history is appended.
+app.patch('/api/patients/:patientId', requirePermission('patients:manage'), (req, res) => {
+  const rec = patients.get(req.params.patientId);
+  if (!rec) {
+    res.status(404).json({ error: 'patient not found' });
+    return;
+  }
+  const { firstName, lastName, dob, gender, disease, drugs, email, password, reason } = req.body ?? {};
+  const fields: Record<string, unknown> = {};
+  if (typeof firstName === 'string' && firstName.trim()) fields.firstName = firstName.trim();
+  if (typeof lastName === 'string' && lastName.trim()) fields.lastName = lastName.trim();
+  if (typeof dob === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dob)) fields.dob = dob;
+  if (typeof gender === 'string' && gender.trim()) fields.gender = gender.trim();
+  if (typeof disease === 'string' && disease.trim()) fields.disease = disease.trim();
+  if (Array.isArray(drugs)) fields.drugs = drugs.filter((d): d is string => typeof d === 'string' && d.trim().length > 0).map((d) => d.trim());
+  const why = typeof reason === 'string' && reason.trim() ? reason.trim() : 'clinical update';
+  const editor = actingUser(req);
+  const result = patients.applyChange(rec.patientId, fields, editor, why);
+
+  // Credential updates are separate history entries.
+  let credentialBlocks = 0;
+  if (typeof email === 'string' && EMAIL_RE.test(email.trim()) && email.trim().toLowerCase() !== rec.email) {
+    const mail = email.trim().toLowerCase();
+    try {
+      const portal = users.get(`user-${rec.patientId}`);
+      if (portal) users.updateUsername(portal.userId, mail);
+      patients.setEmail(rec.patientId, mail, editor, 'portal email change');
+      credentialBlocks++;
+    } catch {
+      res.status(409).json({ error: `email '${mail}' is already in use` });
+      return;
+    }
+  }
+  if (typeof password === 'string' && password.length >= 8) {
+    const portal = users.get(`user-${rec.patientId}`);
+    if (portal) {
+      users.updatePassword(portal.userId, password);
+      credentialBlocks++;
+      patients.linkUser(rec.patientId, portal.userId); // no-op, keeps types happy
+    }
+  }
+
+  if (!result && credentialBlocks === 0) {
+    res.status(400).json({ error: 'no changes supplied' });
+    return;
+  }
+  if (result) {
+    ledger.append('PATIENT_UPDATED', { patientId: rec.patientId, patientRef: rec.data.patientRef, changedBy: editor?.username ?? 'unknown', reason: why, changes: result.block.changes });
+    broadcast({ type: 'PATIENT', data: { action: 'updated', patientRef: rec.data.patientRef, changedBy: editor?.username }, ts: new Date().toISOString() });
+  }
+  if (credentialBlocks > 0) {
+    ledger.append('PATIENT_UPDATED', { patientId: rec.patientId, patientRef: rec.data.patientRef, changedBy: editor?.username ?? 'unknown', reason: 'portal credentials change', fields: ['email' /* or password */] });
+  }
+  const hospitals = new Map(store.listHospitals().map((h) => [h.siteId, h.name]));
+  const updated = patients.get(rec.patientId)!;
+  res.json({
+    ...patientView(updated, hospitals),
+    history: patients.historyOf(rec.patientId),
+    visits: patients.visitsOf(rec.patientId).map((v) => ({ ...v, hospitalName: hospitals.get(v.hospitalId) ?? v.hospitalId })),
+  });
+});
+
+// Record a hospital visit (admin/doctor).
+app.post('/api/patients/:patientId/visits', requirePermission('patients:manage'), (req, res) => {
+  const rec = patients.get(req.params.patientId);
+  if (!rec) {
+    res.status(404).json({ error: 'patient not found' });
+    return;
+  }
+  const { hospitalId, reason } = req.body ?? {};
+  if (typeof hospitalId !== 'string' || !store.getHospital(hospitalId)) {
+    res.status(400).json({ error: 'hospitalId must reference an existing hospital' });
+    return;
+  }
+  const visit = patients.addVisit(rec.patientId, hospitalId, typeof reason === 'string' && reason.trim() ? reason.trim() : 'visit', actingUser(req));
+  if (!visit) {
+    res.status(500).json({ error: 'failed to record visit' });
+    return;
+  }
+  ledger.append('PATIENT_VISIT_RECORDED', { patientId: rec.patientId, patientRef: rec.data.patientRef, hospitalId, visitId: visit.visitId, reason: visit.reason });
+  broadcast({ type: 'PATIENT', data: { action: 'visit', patientRef: rec.data.patientRef, hospitalId }, ts: new Date().toISOString() });
+  res.status(201).json({ ...visit, hospitalName: store.getHospital(hospitalId)?.name ?? hospitalId });
+});
+
+// Deactivate (soft delete — history preserved forever).
+app.post('/api/patients/:patientId/deactivate', requirePermission('patients:manage'), (req, res) => {
+  const rec = patients.get(req.params.patientId);
+  if (!rec) {
+    res.status(404).json({ error: 'patient not found' });
+    return;
+  }
+  const editor = actingUser(req);
+  const result = patients.deactivate(rec.patientId, editor, typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'deactivated by admin/doctor');
+  if (!result) {
+    res.status(400).json({ error: 'patient already deactivated' });
+    return;
+  }
+  const portal = users.get(`user-${rec.patientId}`);
+  if (portal) {
+    // keep the login but the portal checks status — simplest: revoke sessions
+    users.revokeAllForUser(portal.userId);
+  }
+  ledger.append('PATIENT_UPDATED', { patientId: rec.patientId, patientRef: rec.data.patientRef, changedBy: editor?.username, reason: 'deactivated', changes: { status: { before: 'active', after: 'deactivated' } } });
+  res.json({ ok: true, status: 'deactivated' });
+});
+
+// Reactivate.
+app.post('/api/patients/:patientId/reactivate', requirePermission('patients:manage'), (req, res) => {
+  const rec = patients.get(req.params.patientId);
+  if (!rec) {
+    res.status(404).json({ error: 'patient not found' });
+    return;
+  }
+  const editor = actingUser(req);
+  const result = patients.reactivate(rec.patientId, editor, 'reactivated by admin/doctor');
+  if (!result) {
+    res.status(400).json({ error: 'patient is already active' });
+    return;
+  }
+  ledger.append('PATIENT_UPDATED', { patientId: rec.patientId, patientRef: rec.data.patientRef, changedBy: editor?.username, reason: 'reactivated', changes: { status: { before: 'deactivated', after: 'active' } } });
+  res.json({ ok: true, status: 'active' });
 });
 
 // ── Audit ledger ─────────────────────────────────────────────────────────────

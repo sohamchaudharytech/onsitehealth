@@ -82,17 +82,38 @@ export class UserStore {
     return false;
   }
 
-  create(username: string, password: string, role: Role, hospitalId?: string, fullName?: string): UserRecord {
-    const userId = `user-${newOpaqueToken().slice(0, 12)}`;
+  create(username: string, password: string, role: Role, hospitalId?: string, fullName?: string, userId?: string): UserRecord {
+    const id = userId ?? `user-${newOpaqueToken().slice(0, 12)}`;
     const rec: UserRecord = {
-      userId,
+      userId: id,
       username,
       passwordHash: hashPassword(password),
       role,
       ...(role === 'doctor' ? { hospitalId, fullName } : {}),
     };
-    this.users.set(userId, rec);
-    this.byUsername.set(username, userId);
+    this.users.set(id, rec);
+    this.byUsername.set(username, id);
+    return rec;
+  }
+
+  /** Change login username (portal email). Old username is freed. */
+  updateUsername(userId: string, newUsername: string): UserRecord | null {
+    const rec = this.users.get(userId);
+    if (!rec) return null;
+    if (this.byUsername.has(newUsername) && this.byUsername.get(newUsername) !== userId) {
+      throw new Error(`username '${newUsername}' already taken`);
+    }
+    this.byUsername.delete(rec.username);
+    rec.username = newUsername;
+    this.byUsername.set(newUsername, userId);
+    return rec;
+  }
+
+  /** Change login password. */
+  updatePassword(userId: string, newPassword: string): UserRecord | null {
+    const rec = this.users.get(userId);
+    if (!rec) return null;
+    rec.passwordHash = hashPassword(newPassword);
     return rec;
   }
 

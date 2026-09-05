@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import type { Role } from './auth.js';
 
-export const ALL_ROLES: readonly Role[] = ['admin', 'operator', 'auditor', 'viewer', 'doctor'];
+export const ALL_ROLES: readonly Role[] = ['admin', 'operator', 'auditor', 'viewer', 'doctor', 'patient'];
 
 /**
  * PRD §7.5 permission matrix. Single source of truth for every service.
@@ -10,11 +10,12 @@ export const PERMISSIONS = {
   'reference:publish': ['admin', 'doctor'],
   'sites:manage': ['admin'],
   'orders:submit': ['admin', 'operator'],
-  'dashboard:view': ['admin', 'operator', 'auditor', 'viewer', 'doctor'],
+  'dashboard:view': ['admin', 'operator', 'auditor', 'viewer', 'doctor', 'patient'],
   'audit:view': ['admin', 'auditor'],
   'users:manage': ['admin'],
   'hospitals:manage': ['admin'],
   'formulary:manage': ['admin', 'doctor'],
+  'patients:manage': ['admin', 'doctor'],
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Permission = keyof typeof PERMISSIONS;

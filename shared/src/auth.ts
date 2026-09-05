@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
-export type Role = 'admin' | 'operator' | 'auditor' | 'viewer' | 'doctor';
+export type Role = 'admin' | 'operator' | 'auditor' | 'viewer' | 'doctor' | 'patient';
 
 export interface JwtPayload {
   userId: string;

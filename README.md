@@ -89,6 +89,7 @@ All dashboard/API access is authenticated. Demo accounts (seeded at startup):
 | `auditor` | `auditor123` | auditor |
 | `viewer` | `viewer123` | viewer |
 | `doctor` | `doctor123` | doctor (Doctor Portal — publishes drug-interaction rules) |
+| `ava.thompson@demo.health` | `patient12345` | patient (read-only Patient Portal — demo patient P-000123) |
 
 **Auth flow:** `POST /api/auth/login` → 15-min HS256 JWT access token
 (`{userId, username, role}`) + opaque refresh token. Refresh tokens are stored
@@ -108,6 +109,7 @@ auto-refreshes on 401 and supports logout. Passwords are scrypt-hashed.
 | `users:manage` | admin |
 | `hospitals:manage` | admin |
 | `formulary:manage` (provision drugs) | admin, doctor |
+| `patients:manage` (create/edit patients) | admin, doctor |
 
 The dashboard disables buttons the current role can't use (with a tooltip
 explaining why); the server enforces the same matrix regardless of client.
@@ -191,6 +193,14 @@ GET  /api/doctors                   — doctors with hospital affiliations (admi
 POST /api/doctors                   — add doctor (username/password/hospitalId) (admin)
 POST /api/doctors/simulated         — batch-generate test doctors (admin)
 DELETE /api/doctors/:userId         — remove doctor (admin)
+GET  /api/patients?search=          — patients w/ demographics, age, visits (admin/doctor)
+POST /api/patients                  — create patient + portal login (admin/doctor)
+GET  /api/patients/me               — patient portal: own record, read-only (patient)
+GET  /api/patients/:patientId       — record + change-history blocks + visits (admin/doctor)
+PATCH /api/patients/:patientId      — update fields/credentials; history appended (admin/doctor)
+POST /api/patients/:patientId/visits — record a hospital visit (admin/doctor)
+POST /api/patients/:patientId/deactivate — soft delete; history preserved (admin/doctor)
+POST /api/patients/:patientId/reactivate — restore access (admin/doctor)
 GET  /api/reference/rules?latest=1  — latest rule versions with attribution
 GET  /api/epoch                     — current global active epoch (coordinator)
 GET  /api/watermarks                — all site watermarks + epoch (coordinator)
@@ -210,6 +220,12 @@ role, hospital for doctors) — visible in the admin/doctor rules tables.
 **Formulary:** each hospital has its own drug list (who provisioned what,
 when); drugs can be provisioned per-hospital from the hospital page or to a
 chosen subset of hospitals from the dashboard.
+**Patients:** patients log into a read-only portal with credentials their
+doctor/admin created. Records (name, DOB, gender, disease, drugs) carry a
+human-readable ID (P-000123). Every change is appended as a history block
+(before/after values) and mirrored into the hash-chained ledger — there is
+NO hard delete, only deactivation. Hospital visits are tracked with time,
+reason, and who recorded them; admins/doctors see the visit trail.
 
 **Simulated hospitals for scale testing:** each generated hospital runs a
 real in-process agent (identical `/internal/push` + `/internal/evaluate`

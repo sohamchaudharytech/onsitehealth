@@ -73,6 +73,51 @@ export interface AlertResult {
   evaluatedAt: string;
 }
 
+// ── Patients ────────────────────────────────────────────────────────────────
+
+/** Core demographics of a patient (immutable fields are versioned via PatientRecord). */
+export interface PatientData {
+  patientRef: string;          // human-readable id, e.g. P-000123
+  firstName: string;
+  lastName: string;
+  dob: string;                 // ISO date YYYY-MM-DD
+  gender: string;
+  disease: string;
+  drugs: string[];             // drugs/medicines prescribed or stocked for the patient
+}
+
+export interface PatientRecord {
+  patientId: string;           // internal id (links to portal login)
+  email: string;               // login email
+  data: PatientData;
+  createdAt: string;
+  createdBy: { userId: string; username: string; role: string } | null;
+  /** linked portal account (mirrored for display) */
+  linkedUserIds: string[];
+  status: 'active' | 'deactivated';
+}
+
+/** One history block — a change to a patient. Old values are kept, never hard-deleted. */
+export interface PatientChangeBlock {
+  seq: number;
+  patientId: string;
+  changedBy: { userId: string; username: string; role: string } | null;
+  changedAt: string;
+  reason: string;
+  /** field -> {before, after} */
+  changes: Record<string, { before: unknown; after: unknown }>;
+}
+
+/** A hospital visit recorded on a patient. */
+export interface PatientVisit {
+  visitId: string;
+  patientId: string;
+  hospitalId: string;
+  visitedAt: string;
+  reason: string;
+  recordedBy: { userId: string; username: string; role: string } | null;
+}
+
 // ── Ledger ──────────────────────────────────────────────────────────────────
 
 export type LedgerEventType =
@@ -88,7 +133,10 @@ export type LedgerEventType =
   | 'DOCTOR_ADDED'
   | 'USER_REMOVED'
   | 'DRUG_ADDED_TO_HOSPITAL'
-  | 'DRUG_REMOVED_FROM_HOSPITAL';
+  | 'DRUG_REMOVED_FROM_HOSPITAL'
+  | 'PATIENT_CREATED'
+  | 'PATIENT_UPDATED'
+  | 'PATIENT_VISIT_RECORDED';
 
 export interface AuditBlock {
   index: number;
@@ -142,7 +190,8 @@ export interface LiveEvent {
     | 'LEDGER'
     | 'HOSPITAL'
     | 'DOCTOR'
-    | 'DRUG';
+    | 'DRUG'
+    | 'PATIENT';
   data: Record<string, unknown>;
   ts: string;
 }

@@ -62,7 +62,61 @@ export interface AlertResult {
     provisional: boolean;
     evaluatedAt: string;
 }
-export type LedgerEventType = 'REFDATA_PUBLISHED' | 'REFDATA_RECEIVED' | 'EPOCH_ADVANCED' | 'ORDER_EVALUATED' | 'SITE_CHAOS_INJECTED' | 'SITE_UNREACHABLE' | 'HOSPITAL_ADDED' | 'HOSPITAL_REMOVED' | 'SIM_HOSPITALS_GENERATED' | 'DOCTOR_ADDED' | 'USER_REMOVED' | 'DRUG_ADDED_TO_HOSPITAL' | 'DRUG_REMOVED_FROM_HOSPITAL';
+/** Core demographics of a patient (immutable fields are versioned via PatientRecord). */
+export interface PatientData {
+    patientRef: string;
+    firstName: string;
+    lastName: string;
+    dob: string;
+    gender: string;
+    disease: string;
+    drugs: string[];
+}
+export interface PatientRecord {
+    patientId: string;
+    email: string;
+    data: PatientData;
+    createdAt: string;
+    createdBy: {
+        userId: string;
+        username: string;
+        role: string;
+    } | null;
+    /** linked portal account (mirrored for display) */
+    linkedUserIds: string[];
+    status: 'active' | 'deactivated';
+}
+/** One history block — a change to a patient. Old values are kept, never hard-deleted. */
+export interface PatientChangeBlock {
+    seq: number;
+    patientId: string;
+    changedBy: {
+        userId: string;
+        username: string;
+        role: string;
+    } | null;
+    changedAt: string;
+    reason: string;
+    /** field -> {before, after} */
+    changes: Record<string, {
+        before: unknown;
+        after: unknown;
+    }>;
+}
+/** A hospital visit recorded on a patient. */
+export interface PatientVisit {
+    visitId: string;
+    patientId: string;
+    hospitalId: string;
+    visitedAt: string;
+    reason: string;
+    recordedBy: {
+        userId: string;
+        username: string;
+        role: string;
+    } | null;
+}
+export type LedgerEventType = 'REFDATA_PUBLISHED' | 'REFDATA_RECEIVED' | 'EPOCH_ADVANCED' | 'ORDER_EVALUATED' | 'SITE_CHAOS_INJECTED' | 'SITE_UNREACHABLE' | 'HOSPITAL_ADDED' | 'HOSPITAL_REMOVED' | 'SIM_HOSPITALS_GENERATED' | 'DOCTOR_ADDED' | 'USER_REMOVED' | 'DRUG_ADDED_TO_HOSPITAL' | 'DRUG_REMOVED_FROM_HOSPITAL' | 'PATIENT_CREATED' | 'PATIENT_UPDATED' | 'PATIENT_VISIT_RECORDED';
 export interface AuditBlock {
     index: number;
     timestamp: string;
@@ -94,7 +148,7 @@ export interface EpochUpdateMessage {
 }
 export type WireMessage = PushMessage | AckMessage | EpochUpdateMessage;
 export interface LiveEvent {
-    type: 'WATERMARK' | 'EPOCH' | 'ALERT_RESULT' | 'CHAOS' | 'PUBLISH' | 'RETRY' | 'UNREACHABLE' | 'LEDGER' | 'HOSPITAL' | 'DOCTOR' | 'DRUG';
+    type: 'WATERMARK' | 'EPOCH' | 'ALERT_RESULT' | 'CHAOS' | 'PUBLISH' | 'RETRY' | 'UNREACHABLE' | 'LEDGER' | 'HOSPITAL' | 'DOCTOR' | 'DRUG' | 'PATIENT';
     data: Record<string, unknown>;
     ts: string;
 }
