@@ -134,6 +134,40 @@ async function api(session: Session, setSession: (s: Session) => void, url: stri
   return res;
 }
 
+type Theme = 'dark' | 'light';
+
+/** Read the boot-script-initialized theme attr as reactive state. */
+function useTheme(): [Theme, () => void] {
+  const [theme, setTheme] = useState<Theme>(() => {
+    const t = typeof document !== 'undefined' ? document.documentElement.getAttribute('data-theme') : null;
+    return t === 'light' ? 'light' : 'dark';
+  });
+  const toggle = () => {
+    setTheme((prev) => {
+      const next: Theme = prev === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      try { localStorage.setItem('hc-theme', next); } catch { /* ignore */ }
+      return next;
+    });
+  };
+  return [theme, toggle];
+}
+
+/** Theme switch shown in the header of every page. */
+function ThemeToggle() {
+  const [theme, toggle] = useTheme();
+  return (
+    <button
+      className="theme-toggle"
+      onClick={toggle}
+      title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+      aria-label="Toggle dark or light theme"
+    >
+      {theme === 'dark' ? '☾ dark' : '☀ light'}
+    </button>
+  );
+}
+
 function Login({ onLogin }: { onLogin: (s: Session) => void }) {
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('admin123');
@@ -163,6 +197,9 @@ function Login({ onLogin }: { onLogin: (s: Session) => void }) {
 
   return (
     <div className="app" style={{ maxWidth: 420, paddingTop: 80 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <ThemeToggle />
+      </div>
       <h1>Clinical Reference-Data Consistency</h1>
       <div className="subtitle">Sign in to view the live multi-site consistency dashboard</div>
       <form className="panel" onSubmit={submit}>
@@ -263,7 +300,10 @@ function HospitalPage({ session, setSession, siteId, onBack }: {
 
   return (
     <div className="app">
-      <div className="back-link"><button onClick={onBack}>← back to dashboard</button></div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div className="back-link" style={{ marginBottom: 0 }}><button onClick={onBack}>← back to dashboard</button></div>
+        <ThemeToggle />
+      </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1>{detail.name}</h1>
         <span className="badge low" style={{ justifySelf: 'end' }}>{detail.simulated ? 'SIMULATED' : 'REAL'} · {detail.siteId}</span>
@@ -480,8 +520,10 @@ function DoctorPage({ session, setSession, onLogout, onOpenHospital }: { session
     <div className="app">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1>Doctor Portal — Drug Reference Updates</h1>
-        <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-          {session.username} ({session.role}) · <button onClick={onLogout} style={{ padding: '4px 10px' }}>Sign out</button>
+        <div style={{ fontSize: 13, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <ThemeToggle />
+          <span>{session.username} ({session.role}) ·</span>
+          <button onClick={onLogout} style={{ padding: '4px 10px' }}>Sign out</button>
         </div>
       </div>
       <div className="subtitle">
@@ -1214,8 +1256,10 @@ function App() {
     <div className="app">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1>Distributed Clinical Reference-Data Consistency</h1>
-        <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-          {session.username} ({session.role}) · <button onClick={logout} style={{ padding: '4px 10px' }}>Sign out</button>
+        <div style={{ fontSize: 13, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <ThemeToggle />
+          <span>{session.username} ({session.role}) ·</span>
+          <button onClick={logout} style={{ padding: '4px 10px' }}>Sign out</button>
         </div>
       </div>
       <div className="subtitle">
