@@ -109,12 +109,19 @@ localStorage and refused by the server.
 **Persistent hash-chain ledger (blockchain concept):** every log, entry,
 and change — rule publishes, hospital/doctor/nurse/patient CRUD, patient
 history blocks, visits, drug provisioning, epoch advances, order
-evaluations — is appended as a block to the hash-chained ledger AND flushed
-to disk (`.data/ledger.jsonl`, append-only JSONL). On boot the chain is
-rehydrated and re-verified; tampering with the file is detected and
+evaluations, logins — is appended as a block to the hash-chained ledger AND
+flushed to disk (`.data/ledger.jsonl`, append-only JSONL). On boot the chain
+is rehydrated and re-verified; tampering with the file is detected and
 reported loudly (`/api/audit/verify` surfaces it). The dashboard event feed
 restores recent history from the ledger on every page load
 (`GET /api/events/recent`), so logs are never lost on refresh or logout.
+
+**Origin tracking (IP + MAC):** every ledger block stamped from a request
+carries the client's IP address and MAC address. Browsers never expose MACs,
+so the SERVER resolves them — synchronously for loopback (host interface)
+and via the OS ARP table for LAN clients (cached 60s; off-LAN/NAT clients
+show IP only). Timestamps render in **Indian Standard Time with the date**
+(`06 Sep 2026, 03:34:15 PM IST`) across the dashboard.
 
 **RBAC permission matrix** (`shared/src/rbac.ts`):
 

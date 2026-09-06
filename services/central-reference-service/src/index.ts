@@ -1,6 +1,7 @@
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
+import { networkInterfaces } from 'node:os';
 import {
   contentHashOf,
   HashChainLedger,
@@ -52,6 +53,98 @@ const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
 const INTERNAL_KEY = process.env.INTERNAL_KEY ?? 'dev-internal-key';
 const ACCESS_TOKEN_TTL_SEC = 15 * 60; // short-lived (PRD §7.4)
 
+// ── Client identity: IP + MAC on every audit event ─────────────────────────
+// Browsers never expose MAC addresses, so the SERVER resolves it from the ARP
+// table for the client's IP (accurate on a LAN; unknown off-LAN/collapsed by
+// NAT). Cached per IP for 60s to avoid hammering `arp`.
+//
+// A per-request AsyncLocalStorage context carries {ip, mac} so BOTH the
+// ledger append wrapper and the live-event broadcast stamp every entry with
+// the originating client — no handler has to do anything.
+
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+interface RequestOrigin {
+  ip: string | null;
+  mac: string | null;
+}
+const requestOriginALS = new AsyncLocalStorage<RequestOrigin>();
+
+const macCache = new Map<string, { mac: string | null; at: number }>();
+const MAC_CACHE_MS = 60_000;
+
+async function resolveMacFor(ip: string): Promise<string | null> {
+  const clean = (ip ?? '').replace(/^::ffff:/, '').replace(/^::1$/, '127.0.0.1');
+  if (clean === '127.0.0.1' || clean === 'localhost' || !clean) {
+    // Loopback: use this host's primary interface MAC.
+    return localMacSync();
+  }
+  const cached = macCache.get(clean);
+  if (cached && Date.now() - cached.at < MAC_CACHE_MS) return cached.mac;
+  let mac: string | null = null;
+  try {
+    const { execFile } = await import('node:child_process');
+    const out = await new Promise<string>((resolve, reject) => {
+      execFile('arp', ['-n', clean], (err: Error | null, stdout: string) => (err ? reject(err) : resolve(stdout)));
+    });
+    // macOS: "host (ip) at <mac> on en0 ..."; Linux: "ip dev type ether <mac>"
+    const m = out.match(/([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})/);
+    if (m) mac = m[1].toLowerCase();
+  } catch {
+    mac = null;
+  }
+  macCache.set(clean, { mac, at: Date.now() });
+  return mac;
+}
+
+/** Resolve the local host's primary MAC synchronously (loopback clients). */
+let localMacCache: string | null | undefined;
+function localMacSync(): string | null {
+  if (localMacCache !== undefined) return localMacCache;
+  try {
+    const ifaces = networkInterfaces();
+    for (const name of ['en0', 'eth0', 'en1']) {
+      const macEntry = ifaces[name]?.find((i) => i.mac && i.mac !== '00:00:00:00:00:00' && i.family === 'IPv4');
+      if (macEntry?.mac) {
+        localMacCache = macEntry.mac;
+        return localMacCache;
+      }
+    }
+    for (const list of Object.values(ifaces)) {
+      const hit = list?.find((i) => i.mac && i.mac !== '00:00:00:00:00:00' && i.family === 'IPv4');
+      if (hit?.mac) {
+        localMacCache = hit.mac;
+        return localMacCache;
+      }
+    }
+  } catch { /* none */ }
+  localMacCache = null;
+  return localMacCache;
+}
+
+/**
+ * Resolve a client MAC if it can be done WITHOUT awaiting: loopback → local
+ * interface MAC; recently-ARP'd → cache. Returns null when only the async
+ * ARP path can answer (the middleware then fills it in best-effort).
+ */
+function macSyncFor(ip: string): string | null {
+  const clean = (ip ?? '').replace(/^::ffff:/, '').replace(/^::1$/, '127.0.0.1');
+  if (clean === '127.0.0.1' || clean === 'localhost' || !clean) return localMacSync();
+  const cached = macCache.get(clean);
+  if (cached && Date.now() - cached.at < MAC_CACHE_MS) return cached.mac;
+  return null;
+}
+
+/**
+ * Stamp a request's origin (ip + mac) into the payload object of a ledger
+ * block. Fire-and-forget MAC resolution: the block is appended first with
+ * the IP, and a resolved MAC is best-effort (the ARP lookup is async).
+ */
+function stampOrigin(target: Record<string, unknown>, ip: string | null | undefined, mac: string | null | undefined): Record<string, unknown> {
+  if (ip) target.ip = ip.replace(/^::ffff:/, '');
+  if (mac) target.mac = mac;
+  return target;
+}
 const store = new CentralStore();
 const ledger = new HashChainLedger();
 
@@ -74,7 +167,14 @@ const ledger = new HashChainLedger();
 }
 const ledgerAppendRaw = ledger.append.bind(ledger);
 ledger.append = (eventType, payload) => {
-  const block = ledgerAppendRaw(eventType, payload);
+  // Stamp the originating client (IP + resolved MAC) on every block when the
+  // append happens inside a request context. Internal/system events
+  // (no request context) pass through unstamped.
+  const origin = requestOriginALS.getStore();
+  const stampedPayload = origin
+    ? stampOrigin({ ...payload }, origin.ip, origin.mac)
+    : payload;
+  const block = ledgerAppendRaw(eventType, stampedPayload);
   persistLedgerBlock(block);
   return block;
 };
@@ -225,6 +325,7 @@ function broadcast(e: LiveEvent): void {
   for (const c of liveClients) if (c.readyState === 1) c.send(msg);
 }
 
+
 /** Barrier read: fetch the current global active epoch from the coordinator. */
 async function currentEpoch(): Promise<number> {
   try {
@@ -360,6 +461,20 @@ app.use(requestLogger());
 app.use(limiter.middleware());
 app.use(sanitizeBody);
 
+// Capture the client origin (IP + best-effort MAC) into the request context
+// so the ledger-append wrapper and live broadcast stamp every entry.
+app.use((req, res, next) => {
+  const ip = (req.ip ?? '').replace(/^::ffff:/, '').replace(/^::1$/, '127.0.0.1') || null;
+  // Synchronous resolution first (loopback / cached); async ARP fills the
+  // store for later blocks in the same request.
+  const syncMac = ip ? macSyncFor(ip) : null;
+  const origin: RequestOrigin = { ip, mac: syncMac };
+  if (ip && !syncMac) {
+    void resolveMacFor(ip).then((mac) => { origin.mac = mac; });
+  }
+  requestOriginALS.run(origin, () => next());
+});
+
 // ── Auth routes (public; rate-limited tightly) ────────────────────────────────
 app.get('/healthz', (_req, res) => res.json({ ok: true, service: 'central-reference-service' }));
 app.post('/api/auth/login', (req, res) => {
@@ -379,6 +494,9 @@ app.post('/api/auth/login', (req, res) => {
     ACCESS_TOKEN_TTL_SEC,
   );
   const refreshToken = users.issueRefreshToken(user.userId);
+  // Audit trail: every successful login is ledgered with the client origin
+  // (ip + resolved mac) — who connected, from where, when.
+  ledger.append('USER_LOGIN', { username: user.username, role: user.role });
   res.json({
     accessToken,
     refreshToken,

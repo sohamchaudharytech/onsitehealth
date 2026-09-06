@@ -138,6 +138,25 @@ const SEVERITY_CLASS: Record<string, string> = {
 };
 
 /**
+ * Format an ISO/UTC timestamp as IST (Indian Standard Time, UTC+5:30) with
+ * the date — e.g. "06 Sep 2026, 02:48:17 PM IST". Fixed to Asia/Kolkata so
+ * every dashboard shows Indian time regardless of the viewer's locale.
+ */
+function fmtIST(iso: string, withSeconds = true): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const date = d.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric' });
+  const time = d.toLocaleTimeString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    ...(withSeconds ? { second: '2-digit' } : {}),
+    hour12: true,
+  });
+  return `${date}, ${time} IST`;
+}
+
+/**
  * Authenticated fetch with automatic refresh-token rotation on 401.
  * Single-flight: concurrent 401s share ONE in-flight refresh call — otherwise
  * parallel requests race, each rotates the refresh token, and the reuse of an
@@ -402,7 +421,7 @@ function NursePage({ session, setSession, onLogout }: { session: Session; setSes
             <span className="k">last visit</span>
             <span style={{ textAlign: 'right' }}>
               {result.lastVisit
-                ? <>{result.lastVisit.at.slice(0, 19).replace('T', ' ')}<br /><span className="muted" style={{ fontSize: 12 }}>{result.lastVisit.hospitalName} — {result.lastVisit.reason}</span></>
+                ? <>{fmtIST(result.lastVisit.at, false)}<br /><span className="muted" style={{ fontSize: 12 }}>{result.lastVisit.hospitalName} — {result.lastVisit.reason}</span></>
                 : <span className="muted">no visits recorded</span>}
             </span>
           </div>
@@ -470,7 +489,7 @@ function PatientPortal({ session, setSession, onLogout }: { session: Session; se
               <div className="row"><span className="k">last name</span><span>{d.lastName}</span></div>
               <div className="row"><span className="k">date of birth</span><span>{d.dob} (age {calcAge(d.dob)})</span></div>
               <div className="row"><span className="k">gender</span><span>{d.gender}</span></div>
-              <div className="row"><span className="k">record created</span><span className="muted">{me.createdAt.slice(0, 19).replace('T', ' ')}</span></div>
+              <div className="row"><span className="k">record created</span><span className="muted">{fmtIST(me.createdAt)}</span></div>
             </div>
             <div className="panel">
               <h2>Condition & medication</h2>
@@ -503,7 +522,7 @@ function PatientPortal({ session, setSession, onLogout }: { session: Session; se
                 {(me.visits ?? []).map((v) => (
                   <tr key={v.visitId}>
                     <td>{v.hospitalName ?? v.hospitalId}</td>
-                    <td className="muted">{v.visitedAt.slice(0, 19).replace('T', ' ')}</td>
+                    <td className="muted">{fmtIST(v.visitedAt)}</td>
                     <td>{v.reason}</td>
                     <td className="muted">{v.recordedBy?.username ?? '—'}</td>
                   </tr>
@@ -524,7 +543,7 @@ function PatientPortal({ session, setSession, onLogout }: { session: Session; se
                 <tbody>
                   {(me.history ?? []).slice().reverse().map((b) => Object.entries(b.changes).map(([field, ch]) => (
                     <tr key={`${b.seq}-${field}`}>
-                      <td className="muted">{b.changedAt.slice(0, 19).replace('T', ' ')}</td>
+                      <td className="muted">{fmtIST(b.changedAt)}</td>
                       <td>{b.changedBy?.username ?? 'system'} <span className="muted">({b.changedBy?.role})</span></td>
                       <td>{field}</td>
                       <td><span className="warn">{JSON.stringify(ch.before)}</span> → <span className="ok">{JSON.stringify(ch.after)}</span></td>
@@ -642,7 +661,7 @@ function HospitalPage({ session, setSession, siteId, onBack }: {
                   <tr key={d.id}>
                     <td>{d.drugName}</td>
                     <td>{d.addedBy ? `${d.addedBy.username} (${d.addedBy.role})` : '—'}</td>
-                    <td className="muted">{d.addedAt.slice(0, 19).replace('T', ' ')}</td>
+                    <td className="muted">{fmtIST(d.addedAt)}</td>
                     <td>
                       {canManage && (
                         <button style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => void removeDrug(d.id)}>remove</button>
@@ -1490,7 +1509,7 @@ function PatientsPanel({ session, setSession }: { session: Session; setSession: 
                     {(selected.visits ?? []).map((v) => (
                       <tr key={v.visitId}>
                         <td>{v.hospitalName ?? v.hospitalId}</td>
-                        <td className="muted">{v.visitedAt.slice(0, 19).replace('T', ' ')}</td>
+                        <td className="muted">{fmtIST(v.visitedAt)}</td>
                         <td>{v.reason}</td>
                         <td className="muted">{v.recordedBy?.username ?? '—'}</td>
                       </tr>
@@ -1508,7 +1527,7 @@ function PatientsPanel({ session, setSession }: { session: Session; setSession: 
                   <tbody>
                     {(selected.history ?? []).slice().reverse().map((b) => Object.entries(b.changes).map(([field, ch]) => (
                       <tr key={`${b.seq}-${field}`}>
-                        <td className="muted">{b.changedAt.slice(0, 19).replace('T', ' ')}</td>
+                        <td className="muted">{fmtIST(b.changedAt)}</td>
                         <td>{b.changedBy?.username ?? 'system'}</td>
                         <td>{field}</td>
                         <td><span className="warn">{JSON.stringify(ch.before)}</span> → <span className="ok">{JSON.stringify(ch.after)}</span></td>
@@ -2229,9 +2248,13 @@ function App() {
           <div className="event-log">
             {events.map((e, i) => (
               <div key={i}>
-                <span className="warn">[{e.ts.slice(11, 23)}]</span>{' '}
+                <span className="warn">[{fmtIST(e.ts)}]</span>{' '}
                 <span className="ok">{e.type}</span>{' '}
-                {JSON.stringify(e.data)}
+                {typeof e.data.eventType === 'string' ? <span className="badge none">{e.data.eventType}</span> : null}{' '}
+                {e.data.username ? <span>by <b>{String(e.data.username)}</b>{typeof e.data.role === 'string' ? ` (${e.data.role})` : ''} </span> : null}
+                {e.data.ip ? <span className="muted">from {String(e.data.ip)}</span> : null}{' '}
+                {e.data.mac ? <span className="muted">[{String(e.data.mac)}]</span> : null}{' '}
+                {(() => { const { ip, mac, username, role, eventType, blockIndex, ...rest } = e.data as Record<string, unknown>; void ip; void mac; void username; void role; void eventType; void blockIndex; return Object.keys(rest).length > 0 ? <span className="muted">{JSON.stringify(rest)}</span> : null; })()}
               </div>
             ))}
           </div>

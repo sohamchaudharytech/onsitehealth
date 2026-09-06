@@ -139,7 +139,8 @@ export type LedgerEventType =
   | 'PATIENT_CREATED'
   | 'PATIENT_UPDATED'
   | 'PATIENT_VISIT_RECORDED'
-  | 'NURSE_ADDED';
+  | 'NURSE_ADDED'
+  | 'USER_LOGIN';
 
 export interface AuditBlock {
   index: number;
