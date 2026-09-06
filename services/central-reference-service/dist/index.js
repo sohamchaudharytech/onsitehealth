@@ -2,7 +2,7 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import { networkInterfaces } from 'node:os';
-import { contentHashOf, HashChainLedger, jwtAuth, requestLogger, requirePermission, sanitizeBody, SlidingWindowLimiter, defaultRateLimitRules, internalKeyGuard, errorHandler, signJwt, verifyJwt, newOpaqueToken, EpochGatedEvaluator, SiteCache, } from '@hc/shared';
+import { contentHashOf, HashChainLedger, jwtAuth, requestLogger, requirePermission, sanitizeBody, RedisSlidingWindowLimiter, defaultRateLimitRules, internalKeyGuard, errorHandler, signJwt, verifyJwt, newOpaqueToken, EpochGatedEvaluator, SiteCache, } from '@hc/shared';
 import { CentralStore } from './store.js';
 import { pushToSite } from './pusher.js';
 import { UserStore } from './users.js';
@@ -398,7 +398,11 @@ async function replayHistoryToSite(site) {
 // helmet → cors → json body-parser (size-capped) → request-id/logger
 //   → rate limiter → sanitize → [JWT auth → RBAC per route] → handler
 //   → centralized error handler
-const limiter = new SlidingWindowLimiter(defaultRateLimitRules());
+// Rate limiter: Redis-backed sliding window (shared across ALL instances —
+// the multi-instance scope the PRD describes). Falls back to the in-memory
+// limiter automatically if Redis is unreachable (single-process scope).
+const REDIS_PORT = Number(process.env.REDIS_PORT ?? 6379);
+const limiter = new RedisSlidingWindowLimiter(defaultRateLimitRules(), { port: REDIS_PORT });
 const app = express();
 app.use(helmet());
 app.use(cors());

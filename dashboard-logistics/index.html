@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Medicine Logistics — Live Tracking</title>
+    <script>
+      // Apply saved theme before first paint (no flash of wrong theme).
+      (function () {
+        try {
+          var t = localStorage.getItem('hc-logistics-theme');
+          if (t !== 'light' && t !== 'dark') t = 'dark';
+          document.documentElement.setAttribute('data-theme', t);
+        } catch (e) { /* private mode etc. — default dark */ }
+      })();
+    </script>
+    <style>
+      :root, [data-theme='dark'] {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --border: #30363d;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --red: #f85149;
+        --amber: #d29922;
+        --btn-bg: #21262d;
+        --btn-primary: #1f6feb;
+        --input-bg: #0d1117;
+        --log-sep: #21262d;
+        --badge-none-bg: #2a241b;
+        --badge-transit-bg: #1b2a1e;
+        --badge-delivered-bg: #12261f;
+        color-scheme: dark;
+      }
+      [data-theme='light'] {
+        --bg: #f6f8fa;
+        --panel: #ffffff;
+        --border: #d0d7de;
+        --text: #1f2328;
+        --muted: #656d76;
+        --accent: #0969da;
+        --green: #1a7f37;
+        --red: #cf222e;
+        --amber: #9a6700;
+        --btn-bg: #ffffff;
+        --btn-primary: #1f6feb;
+        --input-bg: #ffffff;
+        --log-sep: #eaeef2;
+        --badge-none-bg: #fff8c5;
+        --badge-transit-bg: #dafbe1;
+        --badge-delivered-bg: #d3f5e0;
+        color-scheme: light;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+      .app { max-width: 1280px; margin: 0 auto; padding: 24px; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+      .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+      .grid { display: grid; gap: 16px; }
+      .cols-3 { grid-template-columns: repeat(3, 1fr); }
+      .cols-2 { grid-template-columns: 2fr 1fr; }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px;
+      }
+      .metric { font-size: 28px; font-weight: 700; }
+      .metric small { font-size: 12px; color: var(--muted); font-weight: 400; display: block; }
+      .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
+      .row .k { color: var(--muted); }
+      button {
+        background: var(--btn-bg);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 14px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button:hover { border-color: var(--accent); }
+      button.primary { background: var(--btn-primary); border-color: var(--btn-primary); color: #ffffff; }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      input, select {
+        background: var(--input-bg);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 13px;
+      }
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 600;
+      }
+      .badge.not-sent { background: var(--badge-none-bg); color: var(--amber); }
+      .badge.in-transit { background: var(--badge-transit-bg); color: var(--accent); }
+      .badge.delivered { background: var(--badge-delivered-bg); color: var(--green); }
+      .badge.cold { background: var(--badge-none-bg); color: var(--accent); margin-left: 6px; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+      th { color: var(--muted); font-weight: 600; }
+      tr.shipment-row { cursor: pointer; }
+      tr.shipment-row:hover { background: var(--log-sep); }
+      tr.shipment-row.selected { background: var(--log-sep); }
+      .event-log { max-height: 260px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 11px; }
+      .event-log div { padding: 3px 0; border-bottom: 1px solid var(--log-sep); }
+      .ok { color: var(--green); }
+      .err { color: var(--red); }
+      .warn { color: var(--amber); }
+      .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+      .footer-note { color: var(--muted); font-size: 11px; margin-top: 16px; }
+      .muted { color: var(--muted); }
+      .theme-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 12px;
+        font-size: 12px;
+      }
+      .map-wrap { position: relative; }
+      .map-legend {
+        position: absolute;
+        bottom: 8px;
+        left: 8px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 11px;
+        display: flex;
+        gap: 12px;
+      }
+      .legend-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+      .progress-bar {
+        height: 6px;
+        background: var(--log-sep);
+        border-radius: 3px;
+        overflow: hidden;
+        margin-top: 4px;
+      }
+      .progress-bar > div { height: 100%; background: var(--accent); }
+      .progress-bar > div.done { background: var(--green); }
+      .progress-bar > div.waiting { background: var(--amber); }
+      .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
+      .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .form-grid label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 2px; }
+      .form-grid input, .form-grid select { width: 100%; }
+      .form-grid .span2 { grid-column: span 2; }
+      @media (max-width: 900px) {
+        .cols-3 { grid-template-columns: 1fr; }
+        .cols-2 { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

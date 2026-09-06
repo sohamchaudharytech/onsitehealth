@@ -18,6 +18,8 @@
     "./rbac": "./dist/rbac.js",
     "./sanitize": "./dist/sanitize.js",
     "./ratelimit": "./dist/ratelimit.js",
+    "./redis": "./dist/redis.js",
+    "./redislimit": "./dist/redislimit.js",
     "./http": "./dist/http.js"
   },
   "devDependencies": {

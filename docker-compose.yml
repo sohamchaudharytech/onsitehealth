@@ -17,8 +17,9 @@ services:
       PORT: "4001"
       SITE_HOSTS: "site-a:4101,site-b:4102,site-c:4103"
       COORDINATOR_URL: "http://coordinator:4002"
+      REDIS_URL: "redis://redis:6379"
     ports: ["4001:4001"]
-    depends_on: [coordinator]
+    depends_on: [coordinator, redis]
 
   coordinator:
     build:

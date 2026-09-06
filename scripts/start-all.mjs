@@ -24,6 +24,13 @@ const SITE_HOSTS = process.env.SITE_HOSTS ??
   Array.from({ length: SITE_AGENT_COUNT }, (_, i) => `localhost:${4101 + i}`).join(',');
 
 console.log('Starting services...');
+// Redis backs the shared rate limiter (auto-falls back to in-memory if absent)
+await new Promise((resolve) => {
+  const p = spawn('node', ['scripts/ensure-redis.mjs'], { stdio: ['ignore', 'pipe', 'pipe'], cwd: process.cwd() });
+  p.stdout.on('data', (d) => process.stdout.write(`[redis] ${d}`));
+  p.stderr.on('data', (d) => process.stderr.write(`[redis] ${d}`));
+  p.on('exit', resolve);
+});
 start('central', ['npx', 'tsx', 'services/central-reference-service/src/index.ts'], { PORT: '4001', SITE_HOSTS });
 start('coordinator', ['npx', 'tsx', 'services/convergence-coordinator/src/index.ts'], { PORT: '4002' });
 await new Promise((r) => setTimeout(r, 1000));

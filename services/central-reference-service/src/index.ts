@@ -9,7 +9,7 @@ import {
   requestLogger,
   requirePermission,
   sanitizeBody,
-  SlidingWindowLimiter,
+  RedisSlidingWindowLimiter,
   defaultRateLimitRules,
   internalKeyGuard,
   errorHandler,
@@ -451,7 +451,11 @@ async function replayHistoryToSite(site: SiteRecord): Promise<void> {
 // helmet → cors → json body-parser (size-capped) → request-id/logger
 //   → rate limiter → sanitize → [JWT auth → RBAC per route] → handler
 //   → centralized error handler
-const limiter = new SlidingWindowLimiter(defaultRateLimitRules());
+// Rate limiter: Redis-backed sliding window (shared across ALL instances —
+// the multi-instance scope the PRD describes). Falls back to the in-memory
+// limiter automatically if Redis is unreachable (single-process scope).
+const REDIS_PORT = Number(process.env.REDIS_PORT ?? 6379);
+const limiter = new RedisSlidingWindowLimiter(defaultRateLimitRules(), { port: REDIS_PORT });
 
 const app = express();
 app.use(helmet());

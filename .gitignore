@@ -2,3 +2,6 @@ prd.md
 
 # persisted ledger + refresh tokens (runtime state)
 .data/
+
+# locally compiled redis (rate limiter backend) — built by scripts/ensure-redis.mjs
+.redis/

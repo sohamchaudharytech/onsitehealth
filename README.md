@@ -37,8 +37,15 @@ uses its own local freshness to decide; both use the one shared epoch value.
 
 ```bash
 npm install
-node scripts/start-all.mjs        # central :4001, coordinator :4002, sites :4101-4103
+node scripts/start-all.mjs        # + redis :6379, central :4001, coordinator :4002, sites :4101-4103
 ```
+
+`start-all` first ensures Redis is up: if no server answers on :6379 it
+compiles one from source into `.redis/` (one-time; needs only curl, tar,
+make, cc — no brew/docker/admin) and runs it as a daemon with AOF
+persistence in `.redis/data/`. Run `node scripts/ensure-redis.mjs` alone to
+pre-build it. The stack runs fine without Redis too — the rate limiter
+falls back to in-memory.
 
 In another terminal:
 
@@ -287,10 +294,14 @@ at scale — the acceptance demo passes identically at 250 hospitals.
   the overclaim.
 - Storage is in-memory in this phase (MongoDB persistence is a later phase per
   the PRD's build plan); the consistency mechanism is unaffected.
-- The rate limiter is in-memory, so its scope is **per-process** — a
-  multi-instance deployment would back it with Redis. It's application-layer
-  abuse detection, not volumetric DDoS mitigation (that's a load-balancer /
-  WAF concern).
+- The **rate limiter is Redis-backed** (`shared/src/redislimit.ts`): an
+  atomic Lua sliding-window over sorted sets, shared across ALL service
+  instances — two instances behind one limit, not one limit each. Redis
+  data persists via AOF (`appendfsync everysec`) in `.redis/data/`, so
+  windows and offender counts survive restarts. If Redis is unreachable
+  the limiter transparently degrades to the in-memory implementation
+  (per-process scope) — availability over strictness. It's still
+  application-layer abuse detection, not volumetric DDoS mitigation.
 - Dev secrets ship as env-overridable defaults (`JWT_SECRET`,
   `INTERNAL_KEY`) — obviously change them outside local dev.
 - The demo script asserts the security layer too: anonymous → 401, viewer
