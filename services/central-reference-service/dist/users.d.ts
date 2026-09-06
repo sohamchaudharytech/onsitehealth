@@ -64,6 +64,20 @@ export declare class UserStore {
     updatePassword(userId: string, newPassword: string): UserRecord | null;
     /** Unique-username check (UserStore.create is otherwise silent on collision). */
     usernameTaken(username: string): boolean;
+    /** Optional event hook — set by the service to persist grants/revocations. */
+    onRefreshEvent?: (ev: {
+        kind: 'grant';
+        tokenHash: string;
+        userId: string;
+        issuedAt: number;
+    } | {
+        kind: 'revoke';
+        tokenHash: string;
+    } | {
+        kind: 'revoke-all';
+        userId: string;
+    }) => void;
+    private emit;
     issueRefreshToken(userId: string): string;
     /**
      * Rotate: consume a refresh token, return the userId it belongs to.
@@ -75,7 +89,11 @@ export declare class UserStore {
         newToken: string;
     } | null;
     revokeAllForUser(userId: string): void;
-    /** Housekeeping: drop refresh records older than the max age. */
+    /** Restore a granted refresh token from the persistence log (boot). */
+    restoreRefreshToken(tokenHash: string, userId: string, issuedAt: number): void;
+    /** Revoke a single token by hash without emitting events (rehydration). */
+    revokeRefreshTokenByHash(tokenHash: string): void;
+    /** Housekeeping: drop refresh records older than the max age (180 days). */
     prune(maxAgeMs?: number): void;
 }
 //# sourceMappingURL=users.d.ts.map

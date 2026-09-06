@@ -71,6 +71,8 @@ export interface PatientData {
     gender: string;
     disease: string;
     drugs: string[];
+    /** Auto-derived: active drug interactions from the patient's meds vs latest rules. */
+    interactions?: string[];
 }
 export interface PatientRecord {
     patientId: string;

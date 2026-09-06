@@ -83,6 +83,7 @@ interface PatientDataView {
   gender: string;
   disease: string;
   drugs: string[];
+  interactions?: string[];
 }
 
 interface PatientViewT {
@@ -144,6 +145,33 @@ const SEVERITY_CLASS: Record<string, string> = {
  */
 let inflightRefresh: Promise<Session | null> | null = null;
 
+// ── Session persistence: survive page refreshes for months ─────────────────
+// The session (tokens + role) is stored in localStorage. On boot we hydrate
+// it; if the access token has expired the shared refresh rotation mints a
+// fresh one (server-side refresh tokens now live for months), so users stay
+// logged in across refreshes, tabs, and browser restarts.
+
+const SESSION_KEY = 'hc-session';
+
+function saveSession(s: Session | null): void {
+  try {
+    if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+    else localStorage.removeItem(SESSION_KEY);
+  } catch { /* private mode etc. */ }
+}
+
+function loadSession(): Session | null {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw) as Session;
+    if (!s?.accessToken || !s?.refreshToken || !s.role) return null;
+    return s;
+  } catch {
+    return null;
+  }
+}
+
 async function refreshSession(session: Session): Promise<Session | null> {
   if (!inflightRefresh) {
     inflightRefresh = (async () => {
@@ -172,7 +200,7 @@ async function refreshSession(session: Session): Promise<Session | null> {
   return inflightRefresh;
 }
 
-async function api(session: Session, setSession: (s: Session) => void, url: string, init: RequestInit = {}): Promise<Response> {
+async function api(session: Session, setSession: (s: Session | null) => void, url: string, init: RequestInit = {}): Promise<Response> {
   const doFetch = (token: string) =>
     fetch(url, { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}` } });
   let res = await doFetch(session.accessToken);
@@ -286,6 +314,7 @@ interface NurseLookupView {
   gender: string;
   disease: string;
   drugs: string[];
+  interactions?: string[];
   lastVisit: { at: string; reason: string; hospitalName: string } | null;
 }
 
@@ -295,7 +324,7 @@ interface NurseLookupView {
  * drugs, and the last visit (date/time + reason). Nothing else is exposed —
  * no IDs, no DOB, no history, no contact details.
  */
-function NursePage({ session, setSession, onLogout }: { session: Session; setSession: (s: Session) => void; onLogout: () => void }) {
+function NursePage({ session, setSession, onLogout }: { session: Session; setSession: (s: Session | null) => void; onLogout: () => void }) {
   const [email, setEmail] = useState('');
   const [result, setResult] = useState<NurseLookupView | null>(null);
   const [error, setError] = useState('');
@@ -362,6 +391,14 @@ function NursePage({ session, setSession, onLogout }: { session: Session; setSes
             </span>
           </div>
           <div className="row" style={{ alignItems: 'flex-start' }}>
+            <span className="k">active interactions</span>
+            <span style={{ textAlign: 'right' }}>
+              {(result.interactions ?? []).length > 0
+                ? result.interactions!.map((i) => <div key={i} className="badge severe" style={{ display: 'inline-block', margin: '2px 0 2px 6px' }}>{i}</div>)
+                : <span className="ok">none known</span>}
+            </span>
+          </div>
+          <div className="row" style={{ alignItems: 'flex-start' }}>
             <span className="k">last visit</span>
             <span style={{ textAlign: 'right' }}>
               {result.lastVisit
@@ -385,7 +422,7 @@ function NursePage({ session, setSession, onLogout }: { session: Session; setSes
  * the full change history of their record. No edit controls exist here by
  * design — only a doctor or admin can change patient data.
  */
-function PatientPortal({ session, setSession, onLogout }: { session: Session; setSession: (s: Session) => void; onLogout: () => void }) {
+function PatientPortal({ session, setSession, onLogout }: { session: Session; setSession: (s: Session | null) => void; onLogout: () => void }) {
   const [me, setMe] = useState<PatientViewT | null>(null);
   const [error, setError] = useState('');
 
@@ -444,6 +481,14 @@ function PatientPortal({ session, setSession, onLogout }: { session: Session; se
                   {d.drugs.length > 0
                     ? d.drugs.map((drug) => <span key={drug} className="badge low" style={{ display: 'inline-block', margin: '2px 0 2px 6px' }}>{drug}</span>)
                     : <span className="muted">none</span>}
+                </span>
+              </div>
+              <div className="row" style={{ alignItems: 'flex-start' }}>
+                <span className="k">active interactions</span>
+                <span style={{ textAlign: 'right' }}>
+                  {(d.interactions ?? []).length > 0
+                    ? d.interactions!.map((i) => <div key={i} className="badge severe" style={{ display: 'inline-block', margin: '2px 0 2px 6px' }}>{i}</div>)
+                    : <span className="ok">none known</span>}
                 </span>
               </div>
               <div className="row"><span className="k">status</span><span>{me.status === 'active' ? <span className="ok">active</span> : <span className="err">deactivated</span>}</span></div>
@@ -505,7 +550,7 @@ function PatientPortal({ session, setSession, onLogout }: { session: Session; se
  */
 function HospitalPage({ session, setSession, siteId, onBack }: {
   session: Session;
-  setSession: (s: Session) => void;
+  setSession: (s: Session | null) => void;
   siteId: string;
   onBack: () => void;
 }) {
@@ -652,7 +697,7 @@ function HospitalPage({ session, setSession, siteId, onBack }: {
  * the global epoch advances only after ALL sites confirm receipt, so no
  * hospital ever evaluates a partial update.
  */
-function DoctorPage({ session, setSession, onLogout, onOpenHospital }: { session: Session; setSession: (s: Session) => void; onLogout: () => void; onOpenHospital: (siteId: string) => void }) {
+function DoctorPage({ session, setSession, onLogout, onOpenHospital }: { session: Session; setSession: (s: Session | null) => void; onLogout: () => void; onOpenHospital: (siteId: string) => void }) {
   const [sites, setSites] = useState<SiteState[]>([]);
   const [epoch, setEpoch] = useState<{ epochSeq: number; updatedAt: string }>({ epochSeq: 0, updatedAt: '' });
   const [rules, setRules] = useState<RuleVersionView[]>([]);
@@ -875,62 +920,6 @@ function DoctorPage({ session, setSession, onLogout, onOpenHospital }: { session
         </div>
       </div>
 
-      <div className="grid cols-2" style={{ marginBottom: 16 }}>
-        <div className="panel">
-          <h2>Provide drug to hospitals</h2>
-          <div className="row" style={{ flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
-            <input placeholder="drug / medicine name (e.g. aspirin)" value={provideDrugName} onChange={(e) => setProvideDrugName(e.target.value)} />
-            <div className="search-row">
-              <input placeholder="filter hospitals…" value={hospitalSearch} onChange={(e) => setHospitalSearch(e.target.value)} style={{ minWidth: 140 }} />
-              <button style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => setProvideSelected(new Set(filteredHospitals.map((h) => h.siteId)))}>select filtered</button>
-              <button style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => setProvideSelected(new Set())}>clear selection</button>
-            </div>
-            <div style={{ maxHeight: 180, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6, padding: 8 }}>
-              {filteredHospitals.map((h) => (
-                <label key={h.siteId} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, padding: '2px 0', cursor: 'pointer' }}>
-                  <input type="checkbox" checked={provideSelected.has(h.siteId)} onChange={() => toggleProvide(h.siteId)} />
-                  <span>{h.name}</span>
-                  <span className="muted" style={{ fontSize: 11 }}>{h.siteId}</span>
-                </label>
-              ))}
-              {filteredHospitals.length === 0 && <div className="muted" style={{ fontSize: 12 }}>no hospitals match the search</div>}
-            </div>
-            <div className="row"><span className="k">selected hospitals</span><span>{provideSelected.size}</span></div>
-            <button className="primary" onClick={provideDrug} disabled={provideBusy}>{provideBusy ? 'Providing…' : `Provide drug to ${provideSelected.size} hospital${provideSelected.size === 1 ? '' : 's'}`}</button>
-            {provideError && <div className="err" style={{ fontSize: 13 }}>{provideError}</div>}
-            {provideResult && <div className="ok" style={{ fontSize: 13 }}>{provideResult}</div>}
-            <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-              Provision a drug only to the hospitals you pick. Open a hospital below to add drugs individually to that hospital.
-            </div>
-          </div>
-        </div>
-
-        <div className="panel">
-          <h2>Hospitals — open to manage formulary</h2>
-          <div className="search-row">
-            <input placeholder="search hospitals…" value={hospitalSearch} onChange={(e) => setHospitalSearch(e.target.value)} />
-            <span className="muted" style={{ fontSize: 12 }}>{filteredHospitals.length} of {hospitals.length}</span>
-          </div>
-          <div style={{ maxHeight: 260, overflowY: 'auto' }}>
-            <table>
-              <thead><tr><th>hospital</th><th>site</th><th>region</th><th>doctors</th><th></th></tr></thead>
-              <tbody>
-                {filteredHospitals.map((h) => (
-                  <tr key={h.siteId}>
-                    <td>{h.name}</td>
-                    <td style={{ fontFamily: 'ui-monospace, monospace' }}>{h.siteId}</td>
-                    <td>{h.region}</td>
-                    <td>{h.doctorCount}</td>
-                    <td><button style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => onOpenHospital(h.siteId)}>open</button></td>
-                  </tr>
-                ))}
-                {filteredHospitals.length === 0 && <tr><td colSpan={5} style={{ color: 'var(--muted)' }}>{hospitals.length === 0 ? 'no hospitals' : 'no hospitals match the search'}</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
       <div className="panel" style={{ marginBottom: 16 }}>
         <h2>Hospital propagation status{targetSeq > 0 ? ` — rule seq ${targetSeq}` : ' — no rules published yet'}</h2>
         <div className="grid cols-3">
@@ -950,12 +939,125 @@ function DoctorPage({ session, setSession, onLogout, onOpenHospital }: { session
         </div>
       </div>
 
-      <NursesPanel session={session} setSession={setSession} />
-      <PatientsPanel session={session} setSession={setSession} />
+      <ManagementHub session={session} setSession={setSession}>
+        {(active) => (
+          <>
+            {active === 'patients' && <PatientsPanel session={session} setSession={setSession} />}
+            {active === 'nurses' && <NursesPanel session={session} setSession={setSession} />}
+            {active === 'hospitals' && (
+              <div className="grid cols-2">
+                <div className="panel">
+                  <h2>Provide drug to hospitals</h2>
+                  <div className="row" style={{ flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
+                    <input placeholder="drug / medicine name (e.g. aspirin)" value={provideDrugName} onChange={(e) => setProvideDrugName(e.target.value)} />
+                    <div className="search-row">
+                      <input placeholder="filter hospitals…" value={hospitalSearch} onChange={(e) => setHospitalSearch(e.target.value)} style={{ minWidth: 140 }} />
+                      <button style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => setProvideSelected(new Set(filteredHospitals.map((h) => h.siteId)))}>select filtered</button>
+                      <button style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => setProvideSelected(new Set())}>clear selection</button>
+                    </div>
+                    <div style={{ maxHeight: 180, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6, padding: 8 }}>
+                      {filteredHospitals.map((h) => (
+                        <label key={h.siteId} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, padding: '2px 0', cursor: 'pointer' }}>
+                          <input type="checkbox" checked={provideSelected.has(h.siteId)} onChange={() => toggleProvide(h.siteId)} />
+                          <span>{h.name}</span>
+                          <span className="muted" style={{ fontSize: 11 }}>{h.siteId}</span>
+                        </label>
+                      ))}
+                      {filteredHospitals.length === 0 && <div className="muted" style={{ fontSize: 12 }}>no hospitals match the search</div>}
+                    </div>
+                    <div className="row"><span className="k">selected hospitals</span><span>{provideSelected.size}</span></div>
+                    <button className="primary" onClick={provideDrug} disabled={provideBusy}>{provideBusy ? 'Providing…' : `Provide drug to ${provideSelected.size} hospital${provideSelected.size === 1 ? '' : 's'}`}</button>
+                    {provideError && <div className="err" style={{ fontSize: 13 }}>{provideError}</div>}
+                    {provideResult && <div className="ok" style={{ fontSize: 13 }}>{provideResult}</div>}
+                    <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+                      Provision a drug only to the hospitals you pick. Open a hospital below to add drugs individually to that hospital.
+                    </div>
+                  </div>
+                </div>
+
+                <div className="panel">
+                  <h2>Hospitals — open to manage formulary</h2>
+                  <div className="search-row">
+                    <input placeholder="search hospitals…" value={hospitalSearch} onChange={(e) => setHospitalSearch(e.target.value)} />
+                    <span className="muted" style={{ fontSize: 12 }}>{filteredHospitals.length} of {hospitals.length}</span>
+                  </div>
+                  <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+                    <table>
+                      <thead><tr><th>hospital</th><th>site</th><th>region</th><th>doctors</th><th></th></tr></thead>
+                      <tbody>
+                        {filteredHospitals.map((h) => (
+                          <tr key={h.siteId}>
+                            <td>{h.name}</td>
+                            <td style={{ fontFamily: 'ui-monospace, monospace' }}>{h.siteId}</td>
+                            <td>{h.region}</td>
+                            <td>{h.doctorCount}</td>
+                            <td><button style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => onOpenHospital(h.siteId)}>open</button></td>
+                          </tr>
+                        ))}
+                        {filteredHospitals.length === 0 && <tr><td colSpan={5} style={{ color: 'var(--muted)' }}>{hospitals.length === 0 ? 'no hospitals' : 'no hospitals match the search'}</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </ManagementHub>
 
       <div className="footer-note">
         Every update is versioned and hash-chained into the audit ledger. Hospital sites cache new versions as they arrive but evaluate only against the global active epoch (min watermark across all sites) — guaranteeing identical alerts at every hospital.
       </div>
+    </div>
+  );
+}
+
+type MgmtSection = 'patients' | 'nurses' | 'hospitals';
+
+/**
+ * Management hub — three big tiles (Patient / Nurse / Hospital Management)
+ * matching the site-card style of the propagation status cards. Clicking a
+ * tile expands that panel below; clicking again collapses it. Rendered for
+ * admin and doctor only (they hold the management permissions).
+ */
+function ManagementHub({ session, setSession, children }: {
+  session: Session;
+  setSession: (s: Session | null) => void;
+  children: (active: MgmtSection | null, setActive: (s: MgmtSection | null) => void) => React.ReactNode;
+}) {
+  const [active, setActive] = useState<MgmtSection | null>(null);
+  const isAdmin = session.role === 'admin';
+  const isDoctor = session.role === 'doctor';
+  if (!isAdmin && !isDoctor) return null;
+
+  const tiles: Array<{ key: MgmtSection; title: string; desc: string; icon: string }> = [
+    { key: 'patients', title: 'Patient Management', desc: 'create patients, edit conditions & medication, record visits, view change history', icon: '🧑‍⚕️' },
+    { key: 'nurses', title: 'Nurse Management', desc: 'create nurse accounts, assign hospitals, remove access', icon: '👩‍⚕️' },
+    {
+      key: 'hospitals',
+      title: 'Hospital Management',
+      desc: isAdmin
+        ? 'add hospitals, generate simulated fleet for scale testing, provide drugs to hospitals'
+        : 'provide drugs to chosen hospitals, open hospital formulary pages',
+      icon: '🏥',
+    },
+  ];
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div className="grid cols-3" style={{ marginBottom: 16 }}>
+        {tiles.map((t) => (
+          <button
+            key={t.key}
+            className={`mgmt-tile ${active === t.key ? 'active' : ''}`}
+            onClick={() => setActive(active === t.key ? null : t.key)}
+          >
+            <div className="tile-title">{t.icon} {t.title}</div>
+            <div className="tile-desc">{t.desc}</div>
+          </button>
+        ))}
+      </div>
+      {active && children(active, setActive)}
     </div>
   );
 }
@@ -974,7 +1076,7 @@ interface NurseViewT {
  * password + assigned hospital), list them, and remove them. Nurses use
  * these credentials for the masked-patient-lookup dashboard.
  */
-function NursesPanel({ session, setSession }: { session: Session; setSession: (s: Session) => void }) {
+function NursesPanel({ session, setSession }: { session: Session; setSession: (s: Session | null) => void }) {
   const [nurses, setNurses] = useState<NurseViewT[]>([]);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -1076,7 +1178,7 @@ function NursesPanel({ session, setSession }: { session: Session; setSession: (s
 }
 
 /** Small helper: hospital dropdown for the nurse create form (fetches hospitals once). */
-function HospitalSelectForNurses({ value, onChange, session, setSession }: { value: string; onChange: (v: string) => void; session: Session; setSession: (s: Session) => void }) {
+function HospitalSelectForNurses({ value, onChange, session, setSession }: { value: string; onChange: (v: string) => void; session: Session; setSession: (s: Session | null) => void }) {
   const [hospitals, setHospitals] = useState<HospitalView[]>([]);
   useEffect(() => {
     void (async () => {
@@ -1101,7 +1203,7 @@ function HospitalSelectForNurses({ value, onChange, session, setSession }: { val
  * (every change is history-blocked, nothing hard-deleted), record hospital
  * visits, deactivate/reactivate, and inspect the full change history.
  */
-function PatientsPanel({ session, setSession }: { session: Session; setSession: (s: Session) => void }) {
+function PatientsPanel({ session, setSession }: { session: Session; setSession: (s: Session | null) => void }) {
   const [patientsList, setPatientsList] = useState<PatientViewT[]>([]);
   const [allHospitals, setAllHospitals] = useState<HospitalView[]>([]);
   const [search, setSearch] = useState('');
@@ -1331,6 +1433,20 @@ function PatientsPanel({ session, setSession }: { session: Session; setSession: 
               <div className="row"><span className="k">patient ID</span><span style={{ fontFamily: 'ui-monospace, monospace' }}>{selected.data.patientRef}</span></div>
               <div className="row"><span className="k">DOB / age</span><span>{selected.data.dob} ({calcAge(selected.data.dob)}y)</span></div>
               <div className="row"><span className="k">gender</span><span>{selected.data.gender}</span></div>
+              <div className="row" style={{ alignItems: 'flex-start' }}><span className="k">drugs</span>
+                <span style={{ textAlign: 'right' }}>
+                  {selected.data.drugs.length > 0
+                    ? selected.data.drugs.map((d) => <span key={d} className="badge low" style={{ display: 'inline-block', margin: '2px 0 2px 6px' }}>{d}</span>)
+                    : <span className="muted">none</span>}
+                </span>
+              </div>
+              <div className="row" style={{ alignItems: 'flex-start' }}><span className="k">interactions</span>
+                <span style={{ textAlign: 'right' }}>
+                  {(selected.data.interactions ?? []).length > 0
+                    ? selected.data.interactions!.map((i) => <div key={i} className="badge severe" style={{ display: 'inline-block', margin: '2px 0 2px 6px' }}>{i}</div>)
+                    : <span className="ok">none known</span>}
+                </span>
+              </div>
               <div className="row"><span className="k">portal email</span><span>{selected.email}</span></div>
               <div className="row"><span className="k">created by</span><span>{selected.createdBy?.username ?? '—'}</span></div>
               <div className="controls">
@@ -1417,7 +1533,7 @@ function PatientsPanel({ session, setSession }: { session: Session; setSession: 
  * hospitals, and a full rules view with attribution (who added which drug).
  * Rendered for admin only (backed by hospitals:manage / users:manage).
  */
-function AdminSection({ session, setSession, onRefresh, onOpenHospital }: { session: Session; setSession: (s: Session) => void; onRefresh: () => void; onOpenHospital: (siteId: string) => void }) {
+function AdminSection({ session, setSession, onRefresh, onOpenHospital }: { session: Session; setSession: (s: Session | null) => void; onRefresh: () => void; onOpenHospital: (siteId: string) => void }) {
   const [hospitals, setHospitals] = useState<HospitalView[]>([]);
   const [doctors, setDoctors] = useState<DoctorView[]>([]);
   const [rules, setRules] = useState<RuleVersionView[]>([]);
@@ -1827,7 +1943,7 @@ function AdminSection({ session, setSession, onRefresh, onOpenHospital }: { sess
 }
 
 function App() {
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSessionState] = useState<Session | null>(() => loadSession());
   const [sites, setSites] = useState<SiteState[]>([]);
   const [epoch, setEpoch] = useState<{ epochSeq: number; updatedAt: string }>({ epochSeq: 0, updatedAt: '' });
   const [events, setEvents] = useState<LiveEventMsg[]>([]);
@@ -1869,6 +1985,20 @@ function App() {
   useEffect(() => {
     if (!session) return;
     void refresh();
+    // Restore the event feed from the persistent ledger so the log is
+    // populated immediately after a page refresh (not just via WebSocket).
+    void (async () => {
+      try {
+        const res = await api(session, setSession, '/api/events/recent?limit=100');
+        if (res.ok) {
+          const blocks = await res.json();
+          setEvents((prev) => {
+            const restored = blocks as LiveEventMsg[];
+            return [...restored, ...prev].slice(0, 200);
+          });
+        }
+      } catch { /* starting up */ }
+    })();
     // JWT via query param — browsers can't set WS headers
     const ws = new WebSocket(`ws://${location.host}/ws/live?token=${encodeURIComponent(session.accessToken)}`);
     ws.onmessage = (ev) => {
@@ -1893,7 +2023,6 @@ function App() {
   const canChaos = session?.role === 'admin';
   const canOrder = session?.role === 'admin' || session?.role === 'operator';
   const canAudit = session?.role === 'admin' || session?.role === 'auditor';
-  const canAdminManage = session?.role === 'admin';
 
   const publishV2 = async () => {
     if (!session) return;
@@ -1954,8 +2083,28 @@ function App() {
     setLastOrder(null);
   };
 
+  /** Session setter that keeps localStorage in sync (page refresh stays logged in). */
+  const setSession = (s: Session | null) => {
+    setSessionState(s);
+    saveSession(s);
+  };
+
   const allMatch = lastOrder && lastOrder.results.length > 1 &&
     lastOrder.results.every((r) => r.fires === lastOrder.results[0].fires && r.severity === lastOrder.results[0].severity && r.epochUsed === lastOrder.results[0].epochUsed);
+
+  // Boot validation: a hydrated session may hold an expired/revoked refresh
+  // token (e.g. server reset). Probe once; if auth ultimately fails, drop
+  // back to the login screen instead of showing a broken dashboard.
+  const bootedRef = React.useRef(false);
+  useEffect(() => {
+    if (bootedRef.current) return;
+    if (!session) return;
+    bootedRef.current = true;
+    void (async () => {
+      const res = await api(session, setSession, '/api/epoch');
+      if (res.status === 401) setSession(null);
+    })();
+  }, [session?.accessToken]);
 
   if (!session) {
     return <Login onLogin={setSession} />;
@@ -1998,9 +2147,19 @@ function App() {
         Identical orders evaluated at multiple sites always see the same reference snapshot — even while propagation is mid-flight.
       </div>
 
-      {canAdminManage && <AdminSection session={session} setSession={setSession} onRefresh={() => void refresh()} onOpenHospital={(siteId) => setViewingHospital(siteId)} />}
-      {(session.role === 'admin' || session.role === 'doctor') && <NursesPanel session={session} setSession={setSession} />}
-      {(session.role === 'admin' || session.role === 'doctor') && <PatientsPanel session={session} setSession={setSession} />}
+      <ManagementHub session={session} setSession={setSession}>
+        {(active) => (
+          <>
+            {active === 'patients' && <PatientsPanel session={session} setSession={setSession} />}
+            {active === 'nurses' && <NursesPanel session={session} setSession={setSession} />}
+            {active === 'hospitals' && (
+              <>
+                <AdminSection session={session} setSession={setSession} onRefresh={() => void refresh()} onOpenHospital={(siteId) => setViewingHospital(siteId)} />
+              </>
+            )}
+          </>
+        )}
+      </ManagementHub>
 
       <div className="grid cols-3" style={{ marginBottom: 16 }}>
         <div className="panel">

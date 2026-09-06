@@ -100,6 +100,11 @@ export class UserStore {
         return this.byUsername.has(username);
     }
     // ── Refresh tokens ────────────────────────────────────────────────────────
+    /** Optional event hook — set by the service to persist grants/revocations. */
+    onRefreshEvent;
+    emit(ev) {
+        this.onRefreshEvent?.(ev);
+    }
     issueRefreshToken(userId) {
         const token = newOpaqueToken();
         this.refreshTokens.set(sha256Hex(token), {
@@ -108,6 +113,7 @@ export class UserStore {
             issuedAt: Date.now(),
             revoked: false,
         });
+        this.emit({ kind: 'grant', tokenHash: sha256Hex(token), userId, issuedAt: Date.now() });
         return token;
     }
     /**
@@ -126,17 +132,31 @@ export class UserStore {
             return null;
         }
         rec.revoked = true;
+        this.emit({ kind: 'revoke', tokenHash: hash });
         const newToken = this.issueRefreshToken(rec.userId);
         return { userId: rec.userId, newToken };
     }
     revokeAllForUser(userId) {
         for (const rec of this.refreshTokens.values()) {
-            if (rec.userId === userId)
+            if (rec.userId === userId && !rec.revoked) {
                 rec.revoked = true;
+                this.emit({ kind: 'revoke', tokenHash: rec.tokenHash });
+            }
         }
+        this.emit({ kind: 'revoke-all', userId });
     }
-    /** Housekeeping: drop refresh records older than the max age. */
-    prune(maxAgeMs = 30 * 24 * 60 * 60 * 1000) {
+    /** Restore a granted refresh token from the persistence log (boot). */
+    restoreRefreshToken(tokenHash, userId, issuedAt) {
+        this.refreshTokens.set(tokenHash, { userId, tokenHash, issuedAt, revoked: false });
+    }
+    /** Revoke a single token by hash without emitting events (rehydration). */
+    revokeRefreshTokenByHash(tokenHash) {
+        const rec = this.refreshTokens.get(tokenHash);
+        if (rec)
+            rec.revoked = true;
+    }
+    /** Housekeeping: drop refresh records older than the max age (180 days). */
+    prune(maxAgeMs = 180 * 24 * 60 * 60 * 1000) {
         const cutoff = Date.now() - maxAgeMs;
         for (const [hash, rec] of this.refreshTokens) {
             if (rec.issuedAt < cutoff)

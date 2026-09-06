@@ -98,6 +98,24 @@ All dashboard/API access is authenticated. Demo accounts (seeded at startup):
 token revokes the entire token family** (theft detection). The dashboard
 auto-refreshes on 401 and supports logout. Passwords are scrypt-hashed.
 
+**Sessions survive refreshes and restarts:** the dashboard persists the
+session in `localStorage` and rehydrates it on page load; the 15-min access
+token is silently rotated via the refresh token, which lives for **180
+days** and is itself persisted to disk (`.data/refresh.jsonl`, event-sourced
+grants/revocations) — so users stay logged in across page refreshes, browser
+restarts, AND server restarts. A revoked/logged-out token is dropped from
+localStorage and refused by the server.
+
+**Persistent hash-chain ledger (blockchain concept):** every log, entry,
+and change — rule publishes, hospital/doctor/nurse/patient CRUD, patient
+history blocks, visits, drug provisioning, epoch advances, order
+evaluations — is appended as a block to the hash-chained ledger AND flushed
+to disk (`.data/ledger.jsonl`, append-only JSONL). On boot the chain is
+rehydrated and re-verified; tampering with the file is detected and
+reported loudly (`/api/audit/verify` surfaces it). The dashboard event feed
+restores recent history from the ledger on every page load
+(`GET /api/events/recent`), so logs are never lost on refresh or logout.
+
 **RBAC permission matrix** (`shared/src/rbac.ts`):
 
 | Permission | Roles |
@@ -237,6 +255,14 @@ reason, and who recorded them; admins/doctors see the visit trail.
 patient's portal email and sees ONLY a masked summary — name half-hidden
 (Rock → R**k), age, gender, condition, drugs, and last visit date/reason.
 No IDs, DOB, history, or contact details are exposed to nurses.
+**Drug-rule propagation to patients:** when a doctor publishes or updates a
+drug-interaction rule, every active patient whose medication matches the
+drug pair is automatically re-evaluated — their `interactions` list is
+recomputed (e.g. "warfarin + aspirin → SEVERE"), appended as a history
+block (before/after values, source noted), and mirrored into the hash
+chained ledger. Downgrading a rule to NONE clears the interaction the same
+way; changing a patient's medication re-derives their interactions in the
+same history block. Nothing is ever silently overwritten.
 
 **Simulated hospitals for scale testing:** each generated hospital runs a
 real in-process agent (identical `/internal/push` + `/internal/evaluate`

@@ -145,6 +145,20 @@
         font-size: 12px;
       }
       a { color: var(--accent); }
+      .mgmt-tile {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 20px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--accent);
+        background: var(--panel);
+      }
+      .mgmt-tile:hover { border-color: var(--accent); }
+      .mgmt-tile.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+      .tile-title { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
+      .tile-desc { font-size: 12px; color: var(--muted); }
     </style>
   </head>
   <body>

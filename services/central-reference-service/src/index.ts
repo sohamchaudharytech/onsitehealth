@@ -28,6 +28,7 @@ import { CentralStore, type SiteRecord } from './store.js';
 import { pushToSite } from './pusher.js';
 import { UserStore } from './users.js';
 import { PatientStore } from './patients.js';
+import { loadLedgerBlocks, persistLedgerBlock, persistRefreshEvent, loadRefreshEvents } from './persistence.js';
 import {
   generateHospitalName,
   generateRegion,
@@ -53,6 +54,30 @@ const ACCESS_TOKEN_TTL_SEC = 15 * 60; // short-lived (PRD §7.4)
 
 const store = new CentralStore();
 const ledger = new HashChainLedger();
+
+// ── Durability: rehydrate the hash-chain ledger from disk, then persist ──────
+// every new block. The chain survives restarts — logs and audit entries stay
+// even when the admin logs out or the service restarts (blockchain-style:
+// append-only, hash-chained, verified on boot).
+{
+  const blocks = loadLedgerBlocks();
+  if (blocks.length > 0) {
+    ledger.load(blocks);
+    const report = ledger.verify();
+    if (report.valid) {
+      console.log(`[central] ledger rehydrated from disk: ${blocks.length} blocks, chain valid`);
+    } else {
+      // The chain IS the tamper-evidence — report it loudly, keep the data.
+      console.error(`[central] ⚠️ LEDGER TAMPERING DETECTED on load: block ${report.firstBadIndex} — ${report.reason}`);
+    }
+  }
+}
+const ledgerAppendRaw = ledger.append.bind(ledger);
+ledger.append = (eventType, payload) => {
+  const block = ledgerAppendRaw(eventType, payload);
+  persistLedgerBlock(block);
+  return block;
+};
 
 // ── Small helpers ────────────────────────────────────────────────────────────
 function clampNum(input: unknown, fallback: number, min: number, max: number): number {
@@ -80,6 +105,63 @@ function calcAge(dob: string): number {
   return age;
 }
 
+/**
+ * Derive a patient's active drug interactions: check the patient's drugs
+ * against the LATEST version of every rule (severity NONE means no
+ * interaction). Returns entries like "warfarin + aspirin → SEVERE".
+ */
+function patientInteractions(drugs: string[]): string[] {
+  if (drugs.length < 2) return [];
+  const lower = drugs.map((d) => d.toLowerCase());
+  const out: string[] = [];
+  for (const rule of store.latestVersions()) {
+    const p = rule.payload as { drugA?: string; drugB?: string; severity?: string };
+    if (!p.drugA || !p.drugB) continue;
+    const hasA = lower.includes(String(p.drugA).toLowerCase());
+    const hasB = lower.includes(String(p.drugB).toLowerCase());
+    if (hasA && hasB && p.severity && p.severity !== 'NONE') {
+      out.push(`${p.drugA} + ${p.drugB} → ${p.severity}`);
+    }
+  }
+  return out.sort();
+}
+
+/**
+ * Re-evaluate every patient's interactions after a rule publish/update.
+ * Patients whose interaction set CHANGED get an automatic history block
+ * (source: "drug-rule-update") — the record is updated, never overwritten
+ * silently. Also mirrored into the hash-chained ledger.
+ */
+function propagateRuleToPatients(
+  changedBy: { userId: string; username: string; role: string },
+  ruleDesc: string,
+): number {
+  let affected = 0;
+  for (const p of patients.list()) {
+    if (p.status !== 'active') continue;
+    const next = patientInteractions(p.data.drugs);
+    const prev = p.data.interactions ?? [];
+    if (JSON.stringify([...next].sort()) === JSON.stringify([...prev].sort())) continue;
+    const result = patients.applyChange(
+      p.patientId,
+      { interactions: next } as Partial<Record<keyof PatientData, unknown>>,
+      { userId: 'system', username: changedBy.username, role: 'system' },
+      `drug rule ${ruleDesc} — interactions recalculated`,
+    );
+    if (result) {
+      affected++;
+      ledger.append('PATIENT_UPDATED', {
+        patientId: p.patientId,
+        patientRef: p.data.patientRef,
+        changedBy: changedBy.username,
+        reason: `auto: drug rule ${ruleDesc}`,
+        changes: result.block.changes,
+      });
+    }
+  }
+  return affected;
+}
+
 // Demo users — one per RBAC role so every permission row is demonstrable.
 const users = new UserStore([
   { userId: 'user-admin', username: 'admin', password: 'admin123', role: 'admin' },
@@ -89,6 +171,25 @@ const users = new UserStore([
   { userId: 'user-doctor', username: 'doctor', password: 'doctor123', role: 'doctor', hospitalId: 'site-a', fullName: 'Dr. Demo Physician' },
   { userId: 'user-nurse', username: 'nurse@demo.health', password: 'nurse12345', role: 'nurse', hospitalId: 'site-a', fullName: 'Nurse Demo Rivera' },
 ]);
+
+// Rehydrate persisted refresh tokens (event-sourced) and persist new ones —
+// users stay logged in across service restarts for up to 180 days.
+users.onRefreshEvent = persistRefreshEvent;
+{
+  let restored = 0;
+  for (const ev of loadRefreshEvents()) {
+    if (ev.kind === 'grant') {
+      users.restoreRefreshToken(ev.tokenHash, ev.userId, ev.issuedAt);
+      restored++;
+    } else if (ev.kind === 'revoke') {
+      users.revokeRefreshTokenByHash(ev.tokenHash);
+    } else if (ev.kind === 'revoke-all') {
+      users.revokeAllForUser(ev.userId);
+    }
+  }
+  if (restored > 0) console.log(`[central] refresh tokens rehydrated from disk: ${restored} grant events`);
+  users.prune(); // drop anything older than 180 days
+}
 
 // ── Patient registry (demo seed — one patient so the portal is testable) ─────
 const patients = new PatientStore();
@@ -101,8 +202,15 @@ const patients = new PatientStore();
     gender: 'female',
     disease: 'Atrial fibrillation',
     drugs: ['warfarin', 'aspirin'],
+    interactions: [], // recomputed below once the store is ready
   };
   const rec = patients.create(demoData, 'ava.thompson@demo.health', { userId: 'user-admin', username: 'admin', role: 'admin' });
+  // Seed-time recompute so the demo patient reflects any rules published
+  // before this point (none at boot — stays empty until a rule exists).
+  const seedInteractions = patientInteractions(demoData.drugs);
+  if (seedInteractions.length > 0) {
+    patients.applyChange(rec.patientId, { interactions: seedInteractions } as Partial<Record<keyof PatientData, unknown>>, null, 'initial interaction derivation', );
+  }
   users.create('ava.thompson@demo.health', 'patient12345', 'patient', undefined, undefined, `user-${rec.patientId}`);
   patients.linkUser(rec.patientId, `user-${rec.patientId}`);
   patients.addVisit(rec.patientId, 'site-a', 'Initial consultation — atrial fibrillation diagnosis', { userId: 'user-doctor', username: 'doctor', role: 'doctor' });
@@ -363,7 +471,26 @@ app.post('/api/reference/rules', requirePermission('reference:publish'), (req, r
       }
     });
   }
-  res.status(201).json(rec);
+
+  // Auto-update: patients whose medication matches the rule get their
+  // interactions recalculated (with history blocks — never a silent change).
+  const payloadDrugs = payload as { drugA?: string; drugB?: string };
+  const ruleDesc = payloadDrugs.drugA && payloadDrugs.drugB
+    ? `'${payloadDrugs.drugA} + ${payloadDrugs.drugB}' updated (v${rec.version}, seq ${rec.globalSeq})`
+    : `'${ruleId}' updated (v${rec.version}, seq ${rec.globalSeq})`;
+  const affectedPatients = propagateRuleToPatients(
+    { userId: req.user!.userId, username: req.user!.username, role: req.user!.role },
+    ruleDesc,
+  );
+  if (affectedPatients > 0) {
+    broadcast({
+      type: 'PATIENT',
+      data: { action: 'auto-updated', reason: ruleDesc, patients: affectedPatients },
+      ts: new Date().toISOString(),
+    });
+  }
+
+  res.status(201).json({ ...rec, affectedPatients });
 });
 
 app.get('/api/reference/rules', (req, res) => {
@@ -829,6 +956,7 @@ app.post('/api/patients', requirePermission('patients:manage'), (req, res) => {
     gender: typeof gender === 'string' && gender.trim() ? gender.trim() : 'unspecified',
     disease: typeof disease === 'string' && disease.trim() ? disease.trim() : '—',
     drugs: Array.isArray(drugs) ? drugs.filter((d): d is string => typeof d === 'string' && d.trim().length > 0).map((d) => d.trim()) : [],
+    interactions: patientInteractions(Array.isArray(drugs) ? drugs.filter((d): d is string => typeof d === 'string' && d.trim().length > 0).map((d) => d.trim()) : []),
   };
   const creator = actingUser(req);
   const rec = patients.create(data, mail, creator);
@@ -896,6 +1024,11 @@ app.patch('/api/patients/:patientId', requirePermission('patients:manage'), (req
   if (Array.isArray(drugs)) fields.drugs = drugs.filter((d): d is string => typeof d === 'string' && d.trim().length > 0).map((d) => d.trim());
   const why = typeof reason === 'string' && reason.trim() ? reason.trim() : 'clinical update';
   const editor = actingUser(req);
+  // If the medication list changes, re-derive interactions in the SAME
+  // history block so drugs + interactions always stay consistent.
+  if (Array.isArray(drugs)) {
+    fields.interactions = patientInteractions(drugs.filter((d): d is string => typeof d === 'string' && d.trim().length > 0).map((d) => d.trim()));
+  }
   const result = patients.applyChange(rec.patientId, fields, editor, why);
 
   // Credential updates are separate history entries.
@@ -1086,6 +1219,7 @@ app.post('/api/patients/lookup', requirePermission('patients:lookup'), (req, res
     gender: rec.data.gender,
     disease: rec.data.disease,
     drugs: rec.data.drugs,
+    interactions: rec.data.interactions ?? [],
     lastVisit: last
       ? { at: last.visitedAt, reason: last.reason, hospitalName: store.getHospital(last.hospitalId)?.name ?? last.hospitalId }
       : null,
@@ -1101,6 +1235,20 @@ app.get('/api/audit', requirePermission('audit:view'), (req, res) => {
 
 app.get('/api/audit/verify', requirePermission('audit:view'), (_req, res) => {
   res.json(ledger.verify());
+});
+
+// Recent activity for the dashboard event feed — available to EVERY
+// authenticated user (dashboard:view), unlike the full audit trail
+// (audit:view). Backed by the persistent hash-chain ledger, so the feed
+// shows history even immediately after a page refresh or server restart.
+app.get('/api/events/recent', requirePermission('dashboard:view'), (req, res) => {
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit ?? 100)));
+  const blocks = ledger.all().slice(-limit).reverse();
+  res.json(blocks.map((b) => ({
+    type: 'LEDGER' as const,
+    data: { eventType: b.eventType, ...b.payload, blockIndex: b.index },
+    ts: b.timestamp,
+  })));
 });
 
 // ── Users (admin only) ───────────────────────────────────────────────────────────────────────────────

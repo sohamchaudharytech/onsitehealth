@@ -126,6 +126,13 @@ export class UserStore {
 
   // ── Refresh tokens ────────────────────────────────────────────────────────
 
+  /** Optional event hook — set by the service to persist grants/revocations. */
+  onRefreshEvent?: (ev: { kind: 'grant'; tokenHash: string; userId: string; issuedAt: number } | { kind: 'revoke'; tokenHash: string } | { kind: 'revoke-all'; userId: string }) => void;
+
+  private emit(ev: Parameters<NonNullable<UserStore['onRefreshEvent']>>[0]): void {
+    this.onRefreshEvent?.(ev);
+  }
+
   issueRefreshToken(userId: string): string {
     const token = newOpaqueToken();
     this.refreshTokens.set(sha256Hex(token), {
@@ -134,6 +141,7 @@ export class UserStore {
       issuedAt: Date.now(),
       revoked: false,
     });
+    this.emit({ kind: 'grant', tokenHash: sha256Hex(token), userId, issuedAt: Date.now() });
     return token;
   }
 
@@ -152,18 +160,34 @@ export class UserStore {
       return null;
     }
     rec.revoked = true;
+    this.emit({ kind: 'revoke', tokenHash: hash });
     const newToken = this.issueRefreshToken(rec.userId);
     return { userId: rec.userId, newToken };
   }
 
   revokeAllForUser(userId: string): void {
     for (const rec of this.refreshTokens.values()) {
-      if (rec.userId === userId) rec.revoked = true;
+      if (rec.userId === userId && !rec.revoked) {
+        rec.revoked = true;
+        this.emit({ kind: 'revoke', tokenHash: rec.tokenHash });
+      }
     }
+    this.emit({ kind: 'revoke-all', userId });
   }
 
-  /** Housekeeping: drop refresh records older than the max age. */
-  prune(maxAgeMs = 30 * 24 * 60 * 60 * 1000): void {
+  /** Restore a granted refresh token from the persistence log (boot). */
+  restoreRefreshToken(tokenHash: string, userId: string, issuedAt: number): void {
+    this.refreshTokens.set(tokenHash, { userId, tokenHash, issuedAt, revoked: false });
+  }
+
+  /** Revoke a single token by hash without emitting events (rehydration). */
+  revokeRefreshTokenByHash(tokenHash: string): void {
+    const rec = this.refreshTokens.get(tokenHash);
+    if (rec) rec.revoked = true;
+  }
+
+  /** Housekeeping: drop refresh records older than the max age (180 days). */
+  prune(maxAgeMs = 180 * 24 * 60 * 60 * 1000): void {
     const cutoff = Date.now() - maxAgeMs;
     for (const [hash, rec] of this.refreshTokens) {
       if (rec.issuedAt < cutoff) this.refreshTokens.delete(hash);
