@@ -155,10 +155,16 @@ const ledger = new HashChainLedger();
 {
   const blocks = loadLedgerBlocks();
   if (blocks.length > 0) {
-    ledger.load(blocks);
+    // Dedupe by index (keep the LAST occurrence): a brief overlap of two
+    // service instances can append the same index twice. The chain verify
+    // below is still the tamper-evidence — a deliberate edit remains loud.
+    const byIndex = new Map<number, (typeof blocks)[number]>();
+    for (const b of blocks) byIndex.set(b.index, b);
+    const deduped = [...byIndex.entries()].sort((a, b) => a[0] - b[0]).map(([, b]) => b);
+    ledger.load(deduped);
     const report = ledger.verify();
     if (report.valid) {
-      console.log(`[central] ledger rehydrated from disk: ${blocks.length} blocks, chain valid`);
+      console.log(`[central] ledger rehydrated from disk: ${deduped.length} blocks, chain valid`);
     } else {
       // The chain IS the tamper-evidence — report it loudly, keep the data.
       console.error(`[central] ⚠️ LEDGER TAMPERING DETECTED on load: block ${report.firstBadIndex} — ${report.reason}`);

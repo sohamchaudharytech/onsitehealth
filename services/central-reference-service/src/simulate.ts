@@ -98,7 +98,7 @@ export function generateDoctorPassword(): string {
   return `doc-${newOpaqueToken().slice(0, 10)}`;
 }
 
-/** Port range for simulated hospital agents (4201+). */
+/** Port range for simulated hospital agents (4501+; 4201-4500 reserved for auxiliary services like logistics). */
 export function simPortFor(portOffset: number): number {
-  return 4201 + portOffset;
+  return 4501 + portOffset;
 }

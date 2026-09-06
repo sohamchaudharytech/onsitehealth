@@ -129,6 +129,141 @@ function calcAge(dob: string): number {
   return age;
 }
 
+// ── Logistics (independent tracking service, mounted as its own page) ─────────
+// The logistics service has its OWN auth domain (its own users + JWTs), so the
+// page keeps a separate session under 'hc-logistics-session' and talks to the
+// service through the /logistics-api proxy prefix.
+
+interface LogSession {
+  accessToken: string;
+  refreshToken: string;
+  role: string;
+  username: string;
+}
+
+interface GeoPoint {
+  lat: number;
+  lng: number;
+  at: string;
+}
+
+interface LogPlace {
+  name: string;
+  lat: number;
+  lng: number;
+}
+
+type ShipmentStatus = 'NOT_SENT' | 'IN_TRANSIT' | 'DELIVERED';
+
+interface ShipmentViewT {
+  shipmentId: string;
+  orderCode: string;
+  drugName: string;
+  quantity: number;
+  coldChain: boolean;
+  status: ShipmentStatus;
+  origin: LogPlace;
+  destination: LogPlace;
+  route: GeoPoint[];
+  deliveredAt: string | null;
+  createdAt: string;
+  createdBy: { userId: string; username: string; role: string } | null;
+  lastEvent: { from: string; to: string; at: string; by: string } | null;
+  current: { lat: number; lng: number; at: string } | null;
+  progress: number;
+  etaMinutes: number | null;
+  distanceKm: number;
+  remainingKm: number | null;
+  routeFraction: number;
+}
+
+interface LogisticsEventMsg {
+  type: 'SHIPMENT_CREATED' | 'SHIPMENT_STATUS' | 'SHIPMENT_LOCATION' | 'LEDGER';
+  data: Record<string, unknown>;
+  ts: string;
+}
+
+const LOG_SESSION_KEY = 'hc-logistics-session';
+let inflightLogRefresh: Promise<LogSession | null> | null = null;
+
+function saveLogSession(s: LogSession | null): void {
+  try {
+    if (s) localStorage.setItem(LOG_SESSION_KEY, JSON.stringify(s));
+    else localStorage.removeItem(LOG_SESSION_KEY);
+  } catch { /* private mode */ }
+}
+
+function loadLogSession(): LogSession | null {
+  try {
+    const raw = localStorage.getItem(LOG_SESSION_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw) as LogSession;
+    if (!s?.accessToken || !s?.refreshToken || !s.role) return null;
+    return s;
+  } catch {
+    return null;
+  }
+}
+
+async function refreshLogSession(session: LogSession): Promise<LogSession | null> {
+  if (!inflightLogRefresh) {
+    inflightLogRefresh = (async () => {
+      try {
+        const r = await fetch('/logistics-api/auth/refresh', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ refreshToken: session.refreshToken }),
+        });
+        if (!r.ok) return null;
+        const next = await r.json();
+        return {
+          accessToken: next.accessToken,
+          refreshToken: next.refreshToken,
+          role: next.role,
+          username: next.username,
+        } satisfies LogSession;
+      } catch {
+        return null;
+      } finally {
+        setTimeout(() => { inflightLogRefresh = null; }, 0);
+      }
+    })();
+  }
+  return inflightLogRefresh;
+}
+
+async function logApi(session: LogSession, setSession: (s: LogSession | null) => void, url: string, init: RequestInit = {}): Promise<Response> {
+  const doFetch = (token: string) =>
+    fetch(url, { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}` } });
+  let res = await doFetch(session.accessToken);
+  if (res.status === 401) {
+    const next = await refreshLogSession(session);
+    if (next) {
+      setSession(next);
+      res = await doFetch(next.accessToken);
+    }
+  }
+  return res;
+}
+
+const LOG_STATUS_COLOR: Record<ShipmentStatus, string> = {
+  NOT_SENT: '#d29922',
+  IN_TRANSIT: '#58a6ff',
+  DELIVERED: '#3fb950',
+};
+
+const LOG_STATUS_CLASS: Record<ShipmentStatus, string> = {
+  NOT_SENT: 'low',
+  IN_TRANSIT: 'none',
+  DELIVERED: 'none',
+};
+
+const LOG_STATUS_LABEL: Record<ShipmentStatus, string> = {
+  NOT_SENT: 'NOT SENT',
+  IN_TRANSIT: 'ON THE WAY',
+  DELIVERED: 'DELIVERED',
+};
+
 const SEVERITY_CLASS: Record<string, string> = {
   NONE: 'none',
   LOW: 'low',
@@ -434,6 +569,486 @@ function NursePage({ session, setSession, onLogout }: { session: Session; setSes
     </div>
   );
 }
+// ── Logistics page (independent tracking service) ─────────────────────────────
+
+/** SVG map of shipments — no external tile dependency. */
+function LogisticsMap({ shipments, selectedId, onSelect }: {
+  shipments: ShipmentViewT[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const W = 800;
+  const H = 460;
+  const PAD = 40;
+
+  const bounds = React.useMemo(() => {
+    const pts: Array<{ lat: number; lng: number }> = [];
+    for (const s of shipments) {
+      pts.push(s.origin, s.destination);
+      for (const p of s.route) pts.push(p);
+    }
+    if (!pts.length) return { minLat: 18.8, maxLat: 19.3, minLng: 72.7, maxLng: 73.1 };
+    let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+    for (const p of pts) {
+      minLat = Math.min(minLat, p.lat); maxLat = Math.max(maxLat, p.lat);
+      minLng = Math.min(minLng, p.lng); maxLng = Math.max(maxLng, p.lng);
+    }
+    const dLat = Math.max(0.02, (maxLat - minLat) * 0.15);
+    const dLng = Math.max(0.02, (maxLng - minLng) * 0.15);
+    return { minLat: minLat - dLat, maxLat: maxLat + dLat, minLng: minLng - dLng, maxLng: maxLng + dLng };
+  }, [shipments]);
+
+  const project = (lat: number, lng: number) => ({
+    x: PAD + ((lng - bounds.minLng) / (bounds.maxLng - bounds.minLng)) * (W - 2 * PAD),
+    y: H - PAD - ((lat - bounds.minLat) / (bounds.maxLat - bounds.minLat)) * (H - 2 * PAD),
+  });
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }} role="img" aria-label="Live shipment map">
+        {Array.from({ length: 9 }, (_, i) => (
+          <line key={`h${i}`} x1={0} x2={W} y1={(i + 1) * (H / 10)} y2={(i + 1) * (H / 10)} stroke="var(--border)" strokeWidth="1" strokeOpacity={0.4} />
+        ))}
+        {Array.from({ length: 15 }, (_, i) => (
+          <line key={`v${i}`} y1={0} y2={H} x1={(i + 1) * (W / 16)} x2={(i + 1) * (W / 16)} stroke="var(--border)" strokeWidth="1" strokeOpacity={0.4} />
+        ))}
+        {shipments.map((s) => {
+          const o = project(s.origin.lat, s.origin.lng);
+          const d = project(s.destination.lat, s.destination.lng);
+          const path = s.route.map((p) => project(p.lat, p.lng));
+          const cur = s.current ? project(s.current.lat, s.current.lng) : o;
+          const selected = s.shipmentId === selectedId;
+          return (
+            <g key={s.shipmentId} onClick={() => onSelect(s.shipmentId)} style={{ cursor: 'pointer' }}>
+              {path.length > 1 && (
+                <polyline
+                  points={path.map((p) => `${p.x},${p.y}`).join(' ')}
+                  fill="none"
+                  stroke={LOG_STATUS_COLOR[s.status]}
+                  strokeOpacity={selected ? 0.9 : 0.45}
+                  strokeWidth={selected ? 2.5 : 1.5}
+                  strokeDasharray={s.status === 'DELIVERED' ? undefined : '4 3'}
+                />
+              )}
+              <rect x={o.x - 4} y={o.y - 4} width={8} height={8} fill="var(--muted)" rx={1} />
+              <circle cx={d.x} cy={d.y} r={5} fill="none" stroke={LOG_STATUS_COLOR[s.status]} strokeWidth={2} />
+              {s.status === 'DELIVERED' && <circle cx={d.x} cy={d.y} r={2} fill={LOG_STATUS_COLOR.DELIVERED} />}
+              {s.status !== 'DELIVERED' && (
+                <>
+                  <circle cx={cur.x} cy={cur.y} r={selected ? 9 : 7} fill={LOG_STATUS_COLOR[s.status]} fillOpacity={0.25} />
+                  <circle cx={cur.x} cy={cur.y} r={4} fill={LOG_STATUS_COLOR[s.status]} />
+                  {s.coldChain && <text x={cur.x + 8} y={cur.y - 6} fontSize={11} fill="var(--accent)">❄</text>}
+                </>
+              )}
+              <text x={o.x + 7} y={o.y - 6} fontSize={10} fill="var(--muted)">{s.origin.name.split(',')[0]}</text>
+              <text x={d.x + 7} y={d.y + 12} fontSize={10} fill="var(--muted)">{s.destination.name.split(',')[0]}</text>
+            </g>
+          );
+        })}
+      </svg>
+      <div style={{ display: 'flex', gap: 14, fontSize: 11, color: 'var(--muted)', marginTop: 6, flexWrap: 'wrap' }}>
+        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: 5, background: LOG_STATUS_COLOR.NOT_SENT, marginRight: 4 }} />not sent</span>
+        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: 5, background: LOG_STATUS_COLOR.IN_TRANSIT, marginRight: 4 }} />on the way</span>
+        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: 5, background: LOG_STATUS_COLOR.DELIVERED, marginRight: 4 }} />delivered</span>
+        <span>❄ cold chain</span>
+      </div>
+    </div>
+  );
+}
+
+const LOG_PRESETS: Array<{ label: string; origin: LogPlace; destination: LogPlace }> = [
+  {
+    label: 'Central Pharmacy → Fortis Mulund',
+    origin: { name: 'Central Pharmacy, Mumbai', lat: 19.076, lng: 72.8777 },
+    destination: { name: 'Fortis Hospital, Mulund', lat: 19.172, lng: 72.957 },
+  },
+  {
+    label: 'Airport Cold Hub → KEM Parel',
+    origin: { name: 'Airport Cold Hub', lat: 19.089, lng: 72.8656 },
+    destination: { name: 'KEM Hospital, Parel', lat: 18.997, lng: 72.842 },
+  },
+  {
+    label: 'Central Pharmacy → Nanavati Vile Parle',
+    origin: { name: 'Central Pharmacy, Mumbai', lat: 19.076, lng: 72.8777 },
+    destination: { name: 'Nanavati Hospital, Vile Parle', lat: 19.102, lng: 72.840 },
+  },
+];
+
+/**
+ * Logistics page — real-time medicine shipment tracking, its own sub-app
+ * inside the main dashboard with a SEPARATE auth domain (the logistics
+ * service has its own users). Reached via the redirect buttons on the
+ * admin/doctor dashboards; not the main page.
+ */
+function LogisticsPage({ onBack, themeToggle }: { onBack: () => void; themeToggle: React.ReactNode }) {
+  const [session, setSessionState] = useState<LogSession | null>(() => loadLogSession());
+  const [shipments, setShipments] = useState<ShipmentViewT[]>([]);
+  const [events, setEvents] = useState<LogisticsEventMsg[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<'ALL' | ShipmentStatus>('ALL');
+  const [ledgerStatus, setLedgerStatus] = useState('');
+  const [connected, setConnected] = useState(false);
+  // login form
+  const [lu, setLu] = useState('admin');
+  const [lp, setLp] = useState('admin123');
+  const [loginError, setLoginError] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
+  // new shipment form
+  const [preset, setPreset] = useState(0);
+  const [orderCode, setOrderCode] = useState('');
+  const [drugName, setDrugName] = useState('');
+  const [quantity, setQuantity] = useState(100);
+  const [coldChain, setColdChain] = useState(false);
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createError, setCreateError] = useState('');
+
+  const setSession = (s: LogSession | null) => {
+    setSessionState(s);
+    saveLogSession(s);
+  };
+
+  const login = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginBusy(true);
+    setLoginError('');
+    try {
+      const r = await fetch('/logistics-api/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: lu.trim(), password: lp }),
+      });
+      const body = await r.json();
+      if (!r.ok) { setLoginError(body.error ?? 'login failed'); return; }
+      setSession(body);
+    } finally { setLoginBusy(false); }
+  };
+
+  const refresh = async () => {
+    if (!session) return;
+    try {
+      const res = await logApi(session, setSession, '/logistics-api/shipments');
+      if (res.status === 401) { setSession(null); return; }
+      if (res.ok) {
+        const body = await res.json();
+        setShipments(body.shipments);
+      }
+    } catch { /* service starting up */ }
+  };
+
+  React.useEffect(() => {
+    if (!session) return;
+    void refresh();
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let closedByUs = false;
+    const connect = () => {
+      ws = new WebSocket(`ws://${location.host}/logistics-ws/live?token=${encodeURIComponent(session!.accessToken)}`);
+      ws.onopen = () => setConnected(true);
+      ws.onclose = () => {
+        setConnected(false);
+        if (!closedByUs) reconnectTimer = setTimeout(connect, 3000);
+      };
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data) as LogisticsEventMsg;
+          setEvents((prev) => [msg, ...prev].slice(0, 200));
+          if (msg.type === 'SHIPMENT_LOCATION') {
+            const { shipmentId, lat, lng, at, progress } = msg.data as Record<string, unknown>;
+            setShipments((prev) => prev.map((s) => {
+              if (s.shipmentId !== shipmentId) return s;
+              return {
+                ...s,
+                current: { lat: lat as number, lng: lng as number, at: at as string },
+                progress: progress as number,
+                route: [...s.route, { lat: lat as number, lng: lng as number, at: at as string }],
+              };
+            }));
+          }
+          if (msg.type === 'SHIPMENT_STATUS' || msg.type === 'SHIPMENT_CREATED') {
+            void refresh();
+          }
+        } catch { /* ignore malformed */ }
+      };
+    };
+    connect();
+    const iv = setInterval(refresh, 5000);
+    return () => {
+      closedByUs = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      clearInterval(iv);
+      ws?.close();
+    };
+  }, [session?.accessToken]);
+
+  const logout = async () => {
+    if (session) {
+      await logApi(session, setSession, '/logistics-api/auth/logout', { method: 'POST' }).catch(() => undefined);
+    }
+    setSession(null);
+    setShipments([]);
+    setEvents([]);
+  };
+
+  const createShipment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!session) return;
+    setCreateBusy(true);
+    setCreateError('');
+    try {
+      const p = LOG_PRESETS[preset];
+      const res = await logApi(session, setSession, '/logistics-api/shipments', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          orderCode: orderCode.trim() || `RX-${Date.now().toString().slice(-6)}`,
+          drugName: drugName.trim(),
+          quantity: Number(quantity),
+          coldChain,
+          origin: p.origin,
+          destination: p.destination,
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) { setCreateError(body.error ?? 'failed to create shipment'); return; }
+      setOrderCode(''); setDrugName(''); setQuantity(100); setColdChain(false);
+      void refresh();
+    } finally { setCreateBusy(false); }
+  };
+
+  const advance = async (s: ShipmentViewT, to: ShipmentStatus) => {
+    if (!session) return;
+    const res = await logApi(session, setSession, `/logistics-api/shipments/${s.shipmentId}/status`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to }),
+    });
+    if (res.ok) void refresh();
+  };
+
+  const verifyLedger = async () => {
+    if (!session) return;
+    const res = await logApi(session, setSession, '/logistics-api/audit/verify').then((r) => r.json());
+    setLedgerStatus(res.valid ? `✅ chain valid (${res.blocksChecked} blocks)` : `❌ TAMPERED at block ${res.firstBadIndex}: ${res.reason}`);
+  };
+
+  if (!session) {
+    return (
+      <div className="app" style={{ maxWidth: 460 }}>
+        <div className="back-link"><button onClick={onBack}>← back to dashboard</button></div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>{themeToggle}</div>
+        <h1>Medicine Logistics — Sign in</h1>
+        <div className="subtitle">The logistics service has its own accounts (independent of the clinical system).</div>
+        <form className="panel" onSubmit={login}>
+          <h2>Logistics sign in</h2>
+          <div className="row" style={{ flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
+            <input placeholder="username" value={lu} onChange={(e) => setLu(e.target.value)} autoComplete="username" />
+            <input placeholder="password" type="password" value={lp} onChange={(e) => setLp(e.target.value)} autoComplete="current-password" />
+            <button className="primary" type="submit" disabled={loginBusy}>{loginBusy ? 'Signing in…' : 'Sign in'}</button>
+            {loginError && <div className="err" style={{ fontSize: 13 }}>{loginError}</div>}
+          </div>
+          <div className="footer-note" style={{ marginTop: 12 }}>
+            Demo accounts — admin/admin123 · dispatcher/dispatcher123 · driver/driver123 · auditor/auditor123 · viewer/viewer123
+          </div>
+        </form>
+      </div>
+    );
+  }
+
+  const canDispatch = session.role === 'admin' || session.role === 'operator';
+  const canAudit = session.role === 'admin' || session.role === 'auditor';
+  const filtered = statusFilter === 'ALL' ? shipments : shipments.filter((s) => s.status === statusFilter);
+  const counts = {
+    notSent: shipments.filter((s) => s.status === 'NOT_SENT').length,
+    inTransit: shipments.filter((s) => s.status === 'IN_TRANSIT').length,
+    delivered: shipments.filter((s) => s.status === 'DELIVERED').length,
+  };
+  const selected = shipments.find((s) => s.shipmentId === selectedId) ?? null;
+
+  return (
+    <div className="app">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div className="back-link" style={{ marginBottom: 0 }}><button onClick={onBack}>← back to dashboard</button></div>
+        <div style={{ fontSize: 13, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {themeToggle}
+          <span className={connected ? 'ok' : 'warn'}>{connected ? '● live' : '○ reconnecting'}</span>
+          <span>{session.username} ({session.role}) ·</span>
+          <button onClick={logout} style={{ padding: '4px 10px' }}>Sign out</button>
+        </div>
+      </div>
+      <h1 style={{ marginTop: 8 }}>Medicine Logistics — Live Tracking</h1>
+      <div className="subtitle">
+        Real-time location of every drug shipment — not sent, on the way, or delivered. Positions stream over WebSocket.
+      </div>
+
+      <div className="grid cols-3" style={{ marginBottom: 16 }}>
+        <div className="panel">
+          <h2>Not sent</h2>
+          <div className="metric" style={{ color: 'var(--amber)' }}>{counts.notSent} <small>waiting at the depot</small></div>
+        </div>
+        <div className="panel">
+          <h2>On the way</h2>
+          <div className="metric" style={{ color: 'var(--accent)' }}>{counts.inTransit} <small>moving now — live GPS</small></div>
+        </div>
+        <div className="panel">
+          <h2>Delivered</h2>
+          <div className="metric" style={{ color: 'var(--green)' }}>{counts.delivered} <small>arrived &amp; signed</small></div>
+        </div>
+      </div>
+
+      <div className="grid cols-2" style={{ marginBottom: 16 }}>
+        <div className="panel">
+          <h2>Live map</h2>
+          <LogisticsMap shipments={filtered} selectedId={selectedId} onSelect={setSelectedId} />
+        </div>
+        <div>
+          {selected ? (
+            <div className="panel" style={{ marginBottom: 16 }}>
+              <h2>{selected.orderCode} — {selected.drugName}</h2>
+              <div className="row"><span className="k">status</span><span><span className={`badge ${LOG_STATUS_CLASS[selected.status]}`}>{LOG_STATUS_LABEL[selected.status]}</span>{selected.coldChain && <span className="badge low" style={{ marginLeft: 6 }}>❄ COLD CHAIN</span>}</span></div>
+              <div className="row"><span className="k">quantity</span><span>{selected.quantity}</span></div>
+              <div className="row"><span className="k">from</span><span>{selected.origin.name}</span></div>
+              <div className="row"><span className="k">to</span><span>{selected.destination.name}</span></div>
+              <div className="row"><span className="k">distance</span><span>{selected.distanceKm} km</span></div>
+              <div className="row"><span className="k">remaining</span><span>{selected.remainingKm != null ? `${selected.remainingKm} km` : '—'}</span></div>
+              <div className="row"><span className="k">ETA</span><span>{selected.etaMinutes != null ? `${selected.etaMinutes} min` : '—'}</span></div>
+              <div className="row"><span className="k">last update</span><span>{selected.current ? fmtIST(selected.current.at, false) : '—'}</span></div>
+              <div className="row"><span className="k">created</span><span>{fmtIST(selected.createdAt)} by {selected.createdBy?.username ?? 'system'}</span></div>
+              <div className="row"><span className="k">delivered</span><span>{selected.deliveredAt ? fmtIST(selected.deliveredAt, false) : '—'}</span></div>
+              <div style={{ height: 8, background: 'var(--border)', borderRadius: 4, marginTop: 10, overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${selected.progress}%`, background: selected.status === 'DELIVERED' ? 'var(--green)' : selected.status === 'NOT_SENT' ? 'var(--amber)' : 'var(--accent)' }} />
+              </div>
+              <div className="row" style={{ marginTop: 4 }}>
+                <span className="k">{selected.progress}% of route</span>
+                <span className="k">{selected.route.length} GPS pings</span>
+              </div>
+              {canDispatch && selected.status !== 'DELIVERED' && (
+                <div className="controls" style={{ marginTop: 8 }}>
+                  {selected.status === 'NOT_SENT' && (
+                    <button className="primary" onClick={() => void advance(selected, 'IN_TRANSIT')}>Dispatch → on the way</button>
+                  )}
+                  {selected.status === 'IN_TRANSIT' && (
+                    <button className="primary" onClick={() => void advance(selected, 'DELIVERED')}>Mark delivered</button>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="panel" style={{ marginBottom: 16 }}>
+              <h2>Shipment detail</h2>
+              <div className="muted" style={{ fontSize: 13 }}>Select a shipment on the map or in the table.</div>
+            </div>
+          )}
+          <div className="panel">
+            <h2>Live event log</h2>
+            <div className="event-log">
+              {events.length === 0 && <div className="muted">waiting for events…</div>}
+              {events.map((e, i) => (
+                <div key={i}>
+                  <span className="warn">[{fmtIST(e.ts)}]</span>{' '}
+                  <span className="ok">{e.type}</span>{' '}
+                  {e.data.orderCode ? <b>{String(e.data.orderCode)}</b> : null}{' '}
+                  {e.type === 'SHIPMENT_LOCATION'
+                    ? <span className="muted">{String(e.data.drugName)} @ {Number(e.data.lat).toFixed(3)}, {Number(e.data.lng).toFixed(3)} ({String(e.data.progress)}%)</span>
+                    : <span className="muted">{JSON.stringify(e.data)}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {canDispatch && (
+        <form className="panel" onSubmit={createShipment} style={{ marginBottom: 16 }}>
+          <h2>Dispatch new shipment</h2>
+          <div className="grid cols-3">
+            <div>
+              <label style={{ fontSize: 12, color: 'var(--muted)' }}>route preset</label>
+              <select value={preset} onChange={(e) => setPreset(Number(e.target.value))} style={{ width: '100%' }}>
+                {LOG_PRESETS.map((p, i) => <option key={p.label} value={i}>{p.label}</option>)}
+              </select>
+              <label style={{ fontSize: 12, color: 'var(--muted)', display: 'block', marginTop: 8 }}>order code</label>
+              <input value={orderCode} onChange={(e) => setOrderCode(e.target.value)} placeholder="auto if empty" style={{ width: '100%' }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, color: 'var(--muted)' }}>drug</label>
+              <input value={drugName} onChange={(e) => setDrugName(e.target.value)} placeholder="e.g. Insulin" required style={{ width: '100%' }} />
+              <label style={{ fontSize: 12, color: 'var(--muted)', display: 'block', marginTop: 8 }}>quantity</label>
+              <input type="number" min={1} value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} style={{ width: '100%' }} />
+            </div>
+            <div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', marginTop: 18 }}>
+                <input type="checkbox" checked={coldChain} onChange={(e) => setColdChain(e.target.checked)} /> cold chain ❄
+              </label>
+              <button className="primary" type="submit" disabled={createBusy || !drugName.trim()} style={{ marginTop: 12 }}>
+                {createBusy ? 'Creating…' : 'Create (NOT SENT)'}
+              </button>
+              {createError && <div className="err" style={{ fontSize: 12, marginTop: 6 }}>{createError}</div>}
+            </div>
+          </div>
+        </form>
+      )}
+
+      <div className="panel" style={{ marginTop: 0 }}>
+        <h2>All shipments</h2>
+        <div className="controls">
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}>
+            <option value="ALL">all statuses</option>
+            <option value="NOT_SENT">not sent</option>
+            <option value="IN_TRANSIT">on the way</option>
+            <option value="DELIVERED">delivered</option>
+          </select>
+          {canAudit && (
+            <>
+              <button onClick={() => void verifyLedger()}>Run ledger integrity check</button>
+              <span style={{ fontSize: 12 }}>{ledgerStatus}</span>
+            </>
+          )}
+          <span className="muted" style={{ fontSize: 12, marginLeft: 'auto' }}>{filtered.length} shown</span>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>order</th><th>drug</th><th>qty</th><th>status</th><th>from</th><th>to</th><th>progress</th><th>ETA</th><th>last ping</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((s) => (
+              <tr
+                key={s.shipmentId}
+                style={{ cursor: 'pointer', background: s.shipmentId === selectedId ? 'var(--btn-bg)' : undefined }}
+                onClick={() => setSelectedId(s.shipmentId)}
+              >
+                <td><b>{s.orderCode}</b></td>
+                <td>{s.drugName}{s.coldChain && <span className="badge low" style={{ marginLeft: 4 }}>❄</span>}</td>
+                <td>{s.quantity}</td>
+                <td><span className={`badge ${LOG_STATUS_CLASS[s.status]}`}>{LOG_STATUS_LABEL[s.status]}</span></td>
+                <td>{s.origin.name.split(',')[0]}</td>
+                <td>{s.destination.name.split(',')[0]}</td>
+                <td style={{ minWidth: 120 }}>
+                  {s.progress}%
+                  <div style={{ height: 5, background: 'var(--border)', borderRadius: 3, marginTop: 3, overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${s.progress}%`, background: s.status === 'DELIVERED' ? 'var(--green)' : s.status === 'NOT_SENT' ? 'var(--amber)' : 'var(--accent)' }} />
+                  </div>
+                </td>
+                <td>{s.etaMinutes != null ? `${s.etaMinutes}m` : '—'}</td>
+                <td className="muted">{s.current ? fmtIST(s.current.at, false) : '—'}</td>
+              </tr>
+            ))}
+            {filtered.length === 0 && (
+              <tr><td colSpan={9} className="muted" style={{ textAlign: 'center', padding: 16 }}>no shipments match this filter</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="footer-note">
+        Independent logistics service (:4301) — live GPS streaming with a hash-chained audit ledger and its own RBAC.
+        Reached from the admin/doctor dashboard; it keeps working even if the clinical services are down.
+      </div>
+    </div>
+  );
+}
+
 /**
  * Patient portal — strictly read-only personal health view. The patient logs
  * in with the email/password their doctor/admin provided and sees their
@@ -716,7 +1331,7 @@ function HospitalPage({ session, setSession, siteId, onBack }: {
  * the global epoch advances only after ALL sites confirm receipt, so no
  * hospital ever evaluates a partial update.
  */
-function DoctorPage({ session, setSession, onLogout, onOpenHospital }: { session: Session; setSession: (s: Session | null) => void; onLogout: () => void; onOpenHospital: (siteId: string) => void }) {
+function DoctorPage({ session, setSession, onLogout, onOpenHospital, onOpenLogistics }: { session: Session; setSession: (s: Session | null) => void; onLogout: () => void; onOpenHospital: (siteId: string) => void; onOpenLogistics: () => void }) {
   const [sites, setSites] = useState<SiteState[]>([]);
   const [epoch, setEpoch] = useState<{ epochSeq: number; updatedAt: string }>({ epochSeq: 0, updatedAt: '' });
   const [rules, setRules] = useState<RuleVersionView[]>([]);
@@ -855,6 +1470,7 @@ function DoctorPage({ session, setSession, onLogout, onOpenHospital }: { session
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1>Doctor Portal — Drug Reference Updates</h1>
         <div style={{ fontSize: 13, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button onClick={onOpenLogistics} title="Real-time medicine shipment tracking" style={{ padding: '4px 10px' }}>🚚 Logistics</button>
           <ThemeToggle />
           <span>{session.username} ({session.role}) ·</span>
           <button onClick={onLogout} style={{ padding: '4px 10px' }}>Sign out</button>
@@ -1973,6 +2589,7 @@ function App() {
   const [chaosSite, setChaosSite] = useState('site-b');
   const [chaosLatency, setChaosLatency] = useState(4000);
   const [viewingHospital, setViewingHospital] = useState<string | null>(null);
+  const [viewingLogistics, setViewingLogistics] = useState(false);
 
   const refresh = async () => {
     if (!session) return;
@@ -2129,6 +2746,15 @@ function App() {
     return <Login onLogin={setSession} />;
   }
 
+  if (viewingLogistics) {
+    return (
+      <LogisticsPage
+        onBack={() => setViewingLogistics(false)}
+        themeToggle={<ThemeToggle />}
+      />
+    );
+  }
+
   if (viewingHospital) {
     return (
       <HospitalPage
@@ -2141,7 +2767,7 @@ function App() {
   }
 
   if (session.role === 'doctor') {
-    return <DoctorPage session={session} setSession={setSession} onLogout={logout} onOpenHospital={(siteId) => setViewingHospital(siteId)} />;
+    return <DoctorPage session={session} setSession={setSession} onLogout={logout} onOpenHospital={(siteId) => setViewingHospital(siteId)} onOpenLogistics={() => setViewingLogistics(true)} />;
   }
 
   if (session.role === 'patient') {
@@ -2157,6 +2783,7 @@ function App() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1>Distributed Clinical Reference-Data Consistency</h1>
         <div style={{ fontSize: 13, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button onClick={() => setViewingLogistics(true)} title="Real-time medicine shipment tracking" style={{ padding: '4px 10px' }}>🚚 Logistics</button>
           <ThemeToggle />
           <span>{session.username} ({session.role}) ·</span>
           <button onClick={logout} style={{ padding: '4px 10px' }}>Sign out</button>

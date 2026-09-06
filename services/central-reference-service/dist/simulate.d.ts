@@ -37,6 +37,6 @@ export declare function generateDoctorName(index: number): {
 };
 /** Human-memorable demo password for generated doctors (scalability testing, not production). */
 export declare function generateDoctorPassword(): string;
-/** Port range for simulated hospital agents (4201+). */
+/** Port range for simulated hospital agents (4501+; 4201-4500 reserved for auxiliary services like logistics). */
 export declare function simPortFor(portOffset: number): number;
 //# sourceMappingURL=simulate.d.ts.map

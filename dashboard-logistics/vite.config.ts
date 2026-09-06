@@ -7,9 +7,9 @@ export default defineConfig({
     port: 5174,
     proxy: {
       // Everything (API + WebSocket) is served by the logistics service.
-      '/api': 'http://localhost:4201',
+      '/api': 'http://localhost:4301',
       '/ws': {
-        target: 'ws://localhost:4201',
+        target: 'ws://localhost:4301',
         ws: true,
       },
     },

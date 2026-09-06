@@ -746,7 +746,7 @@ function App() {
       </div>
 
       <div className="footer-note">
-        Independent logistics service (:4201) — tracks medicine deliveries end-to-end (not sent → on the way → delivered) with live GPS streaming,
+        Independent logistics service (:4301) — tracks medicine deliveries end-to-end (not sent → on the way → delivered) with live GPS streaming,
         hash-chained audit ledger, JWT auth + RBAC, and the same middleware pipeline as the clinical network. It shares no runtime state with the
         reference-data services and keeps working even if they are down.
       </div>

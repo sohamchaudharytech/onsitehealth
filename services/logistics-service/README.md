@@ -23,7 +23,7 @@ middleware pipeline and trust model.
 npm install                      # workspace install (picks up services/logistics-service)
 
 # terminal 1 — the logistics service
-npm run dev -w services/logistics-service     # http://localhost:4201
+npm run dev -w services/logistics-service     # http://localhost:4301
 
 # terminal 2 — the logistics dashboard (own deps, like the clinical dashboard)
 cd dashboard-logistics && npm install && npm run dev   # http://localhost:5174
@@ -55,7 +55,9 @@ everything coexists (different ports).
 
 A movement simulator advances every `IN_TRANSIT` shipment along its route
 every 2s (configurable) and auto-delivers on arrival — so the dashboard is
-alive immediately, no manual clicking needed.
+alive immediately, no manual clicking needed. A **demo loop** dispatches a
+fresh batch whenever everything has arrived, so the map never goes static
+(set `DEMO_LOOP=0` to disable).
 
 ## Demo accounts
 
@@ -90,9 +92,10 @@ transitions (e.g. back from `DELIVERED`) are rejected with 409.
 
 | Var | Default | |
 |-----|---------|---|
-| `PORT` | `4201` | service port |
+| `PORT` | `4301` | service port |
 | `SIM_TICK_MS` | `2000` | GPS ping interval per shipment |
-| `SIM_SPEED` | `0.06` | fraction of route advanced per tick |
+| `SIM_SPEED` | `0.035` | fraction of route advanced per tick |
+| `DEMO_LOOP` | `1` | set `0` to stop auto-dispatching demo batches |
 | `JWT_SECRET` | dev default | override outside local dev |
 | `INTERNAL_KEY` | dev default | for `/internal/*` routes |
 

@@ -4,6 +4,7 @@
     { "path": "shared" },
     { "path": "services/central-reference-service" },
     { "path": "services/convergence-coordinator" },
-    { "path": "services/site-agent" }
+    { "path": "services/site-agent" },
+    { "path": "services/logistics-service" }
   ]
 }

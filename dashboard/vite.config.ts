@@ -11,6 +11,17 @@ export default defineConfig({
       '/api/watermarks': 'http://localhost:4002',
       '/api/sites': 'http://localhost:4001',
       '/api': 'http://localhost:4001',
+      // Logistics (independent service) — distinct prefix so the two APIs
+      // coexist on the same dashboard origin.
+      '/logistics-api': {
+        target: 'http://localhost:4301',
+        rewrite: (path) => path.replace(/^\/logistics-api/, '/api'),
+      },
+      '/logistics-ws': {
+        target: 'ws://localhost:4301',
+        ws: true,
+        rewrite: (path) => path.replace(/^\/logistics-ws/, '/ws'),
+      },
       '/ws': {
         target: 'ws://localhost:4001',
         ws: true,

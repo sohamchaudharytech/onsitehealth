@@ -20,8 +20,9 @@ start('logistics-service', ['npx', 'tsx', 'services/logistics-service/src/index.
 await new Promise((r) => setTimeout(r, 1000));
 start('logistics-dashboard', ['npm', 'run', 'dev'], { cwd: 'dashboard-logistics' });
 
-console.log('\nLogistics service  → http://localhost:4201');
+console.log('\nLogistics service  → http://localhost:4301');
 console.log('Logistics dashboard → http://localhost:5174');
+console.log('Also available inside the MAIN dashboard: http://localhost:5173 → Logistics page');
 console.log('Demo login: admin/admin123 (or dispatcher/dispatcher123, viewer/viewer123)\n');
 
 const shutdown = () => { procs.forEach((p) => p.kill()); process.exit(0); };

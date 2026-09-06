@@ -33,6 +33,7 @@ await new Promise((resolve) => {
 });
 start('central', ['npx', 'tsx', 'services/central-reference-service/src/index.ts'], { PORT: '4001', SITE_HOSTS });
 start('coordinator', ['npx', 'tsx', 'services/convergence-coordinator/src/index.ts'], { PORT: '4002' });
+start('logistics', ['npx', 'tsx', 'services/logistics-service/src/index.ts'], { PORT: '4301' });
 await new Promise((r) => setTimeout(r, 1000));
 
 const siteIdFor = (i) => {

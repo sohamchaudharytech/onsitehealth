@@ -19,7 +19,7 @@ import { HashChainLedger } from './ledger.js';
 import { advanceProgress, etaMinutes, fractionAlong, interpolate } from './sim.js';
 import type { GeoPoint, LogisticsLiveEvent, Shipment, ShipmentStatus } from './types.js';
 
-const PORT = Number(process.env.PORT ?? 4201);
+const PORT = Number(process.env.PORT ?? 4301);
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
 const INTERNAL_KEY = process.env.INTERNAL_KEY ?? 'dev-internal-key';
 const ACCESS_TOKEN_TTL_SEC = 15 * 60;
