@@ -1,4 +1,4 @@
-export const ALL_ROLES = ['admin', 'operator', 'auditor', 'viewer', 'doctor', 'patient'];
+export const ALL_ROLES = ['admin', 'operator', 'auditor', 'viewer', 'doctor', 'patient', 'nurse'];
 /**
  * PRD §7.5 permission matrix. Single source of truth for every service.
  */
@@ -6,12 +6,15 @@ export const PERMISSIONS = {
     'reference:publish': ['admin', 'doctor'],
     'sites:manage': ['admin'],
     'orders:submit': ['admin', 'operator'],
-    'dashboard:view': ['admin', 'operator', 'auditor', 'viewer', 'doctor', 'patient'],
+    'dashboard:view': ['admin', 'operator', 'auditor', 'viewer', 'doctor', 'patient', 'nurse'],
     'audit:view': ['admin', 'auditor'],
     'users:manage': ['admin'],
     'hospitals:manage': ['admin'],
     'formulary:manage': ['admin', 'doctor'],
     'patients:manage': ['admin', 'doctor'],
+    'nurses:manage': ['admin', 'doctor'],
+    /** Nurse lookup: masked, minimal patient view by portal email. */
+    'patients:lookup': ['nurse'],
 };
 export function can(role, permission) {
     if (!role)

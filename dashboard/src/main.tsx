@@ -264,7 +264,7 @@ function Login({ onLogin }: { onLogin: (s: Session) => void }) {
           {error && <div className="err" style={{ fontSize: 13 }}>{error}</div>}
         </div>
         <div className="footer-note" style={{ marginTop: 12 }}>
-          Demo accounts — admin/admin123 · operator/operator123 · auditor/auditor123 · viewer/viewer123 · doctor/doctor123 · patient: ava.thompson@demo.health / patient12345
+          Demo accounts — admin/admin123 · operator/operator123 · auditor/auditor123 · viewer/viewer123 · doctor/doctor123 · patient: ava.thompson@demo.health / patient12345 · nurse: nurse@demo.health / nurse12345
         </div>
       </form>
     </div>
@@ -280,6 +280,104 @@ interface RuleVersionView {
   publishedBy?: PublisherView;
 }
 
+interface NurseLookupView {
+  maskedName: string;
+  age: number;
+  gender: string;
+  disease: string;
+  drugs: string[];
+  lastVisit: { at: string; reason: string; hospitalName: string } | null;
+}
+
+/**
+ * Nurse dashboard — takes a patient's portal email and shows ONLY a masked,
+ * minimal clinical summary: masked name (r**k), age, gender, condition,
+ * drugs, and the last visit (date/time + reason). Nothing else is exposed —
+ * no IDs, no DOB, no history, no contact details.
+ */
+function NursePage({ session, setSession, onLogout }: { session: Session; setSession: (s: Session) => void; onLogout: () => void }) {
+  const [email, setEmail] = useState('');
+  const [result, setResult] = useState<NurseLookupView | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const lookup = async () => {
+    const mail = email.trim();
+    if (!mail.includes('@')) { setError('enter the patient portal email'); return; }
+    setBusy(true);
+    setError('');
+    setResult(null);
+    try {
+      const res = await api(session, setSession, '/api/patients/lookup', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: mail }),
+      });
+      const body = await res.json();
+      if (!res.ok) { setError(body.error ?? 'lookup failed'); return; }
+      setResult(body);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="app" style={{ maxWidth: 760 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h1>Nurse Dashboard — Patient Lookup</h1>
+        <div style={{ fontSize: 13, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <ThemeToggle />
+          <span>{session.username} ·</span>
+          <button onClick={onLogout} style={{ padding: '4px 10px' }}>Sign out</button>
+        </div>
+      </div>
+      <div className="subtitle">
+        Enter the patient's portal email to view their masked clinical summary. Names are partially hidden for privacy — e.g. "Rock" is shown as "R**k".
+      </div>
+
+      <div className="panel" style={{ marginBottom: 16 }}>
+        <div className="row" style={{ flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
+          <input
+            placeholder="patient portal email (e.g. ava.thompson@demo.health)"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void lookup(); }}
+          />
+          <button className="primary" onClick={lookup} disabled={busy}>{busy ? 'Looking up…' : 'Look up patient'}</button>
+          {error && <div className="err" style={{ fontSize: 13 }}>{error}</div>}
+        </div>
+      </div>
+
+      {result && (
+        <div className="panel">
+          <h2>Patient summary</h2>
+          <div className="row"><span className="k">name (masked)</span><span>{result.maskedName}</span></div>
+          <div className="row"><span className="k">age</span><span>{result.age} years</span></div>
+          <div className="row"><span className="k">gender</span><span>{result.gender}</span></div>
+          <div className="row"><span className="k">disease / condition</span><span>{result.disease}</span></div>
+          <div className="row" style={{ alignItems: 'flex-start' }}>
+            <span className="k">drugs / medicine</span>
+            <span style={{ textAlign: 'right' }}>
+              {result.drugs.length > 0
+                ? result.drugs.map((d) => <span key={d} className="badge low" style={{ display: 'inline-block', margin: '2px 0 2px 6px' }}>{d}</span>)
+                : <span className="muted">none</span>}
+            </span>
+          </div>
+          <div className="row" style={{ alignItems: 'flex-start' }}>
+            <span className="k">last visit</span>
+            <span style={{ textAlign: 'right' }}>
+              {result.lastVisit
+                ? <>{result.lastVisit.at.slice(0, 19).replace('T', ' ')}<br /><span className="muted" style={{ fontSize: 12 }}>{result.lastVisit.hospitalName} — {result.lastVisit.reason}</span></>
+                : <span className="muted">no visits recorded</span>}
+            </span>
+          </div>
+        </div>
+      )}
+
+      <div className="footer-note">
+        Nurses see a privacy-filtered view only. Patient records can be changed exclusively by doctors and administrators.
+      </div>
+    </div>
+  );
+}
 /**
  * Patient portal — strictly read-only personal health view. The patient logs
  * in with the email/password their doctor/admin provided and sees their
@@ -852,12 +950,148 @@ function DoctorPage({ session, setSession, onLogout, onOpenHospital }: { session
         </div>
       </div>
 
+      <NursesPanel session={session} setSession={setSession} />
       <PatientsPanel session={session} setSession={setSession} />
 
       <div className="footer-note">
         Every update is versioned and hash-chained into the audit ledger. Hospital sites cache new versions as they arrive but evaluate only against the global active epoch (min watermark across all sites) — guaranteeing identical alerts at every hospital.
       </div>
     </div>
+  );
+}
+
+interface NurseViewT {
+  userId: string;
+  username: string;
+  role: string;
+  hospitalId?: string;
+  fullName?: string;
+  hospitalName?: string | null;
+}
+
+/**
+ * Nurses panel — admin & doctor create nurse accounts (login email +
+ * password + assigned hospital), list them, and remove them. Nurses use
+ * these credentials for the masked-patient-lookup dashboard.
+ */
+function NursesPanel({ session, setSession }: { session: Session; setSession: (s: Session) => void }) {
+  const [nurses, setNurses] = useState<NurseViewT[]>([]);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [hospitalId, setHospitalId] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [created, setCreated] = useState<{ email: string; password: string } | null>(null);
+
+  const canManage = session.role === 'admin' || session.role === 'doctor';
+
+  const refresh = async () => {
+    if (!canManage) return;
+    try {
+      const res = await api(session, setSession, '/api/nurses');
+      const body = await res.json();
+      if (res.ok) setNurses(body);
+    } catch { /* starting up */ }
+  };
+
+  useEffect(() => {
+    void refresh();
+    const iv = setInterval(refresh, 8000);
+    return () => clearInterval(iv);
+  }, [session?.accessToken]);
+
+  const createNurse = async () => {
+    const mail = email.trim();
+    if (!mail.includes('@')) { setError('a valid login email is required'); return; }
+    if (password.length < 8) { setError('password must be at least 8 characters'); return; }
+    if (!hospitalId) { setError('choose the assigned hospital'); return; }
+    setBusy(true);
+    setError('');
+    try {
+      const res = await api(session, setSession, '/api/nurses', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: mail, password, fullName: fullName || undefined, hospitalId }),
+      });
+      const body = await res.json();
+      if (!res.ok) { setError(body.error ?? 'failed to create nurse'); return; }
+      setCreated({ email: mail, password });
+      setEmail(''); setPassword(''); setFullName('');
+      void refresh();
+    } finally { setBusy(false); }
+  };
+
+  const removeNurse = async (userId: string) => {
+    await api(session, setSession, `/api/nurses/${userId}`, { method: 'DELETE' });
+    void refresh();
+  };
+
+  if (!canManage) return null;
+
+  return (
+    <div className="panel" style={{ marginBottom: 16 }}>
+      <h2>Nurses ({nurses.length})</h2>
+      <div className="grid cols-2">
+        <div>
+          <h2>Create nurse account</h2>
+          <div className="row" style={{ flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
+            <input placeholder="nurse login email (e.g. mia.hart@demo.health)" value={email} onChange={(e) => setEmail(e.target.value)} />
+            <input placeholder="password (min 8 chars)" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            <input placeholder="full name (optional, e.g. Mia Hart)" value={fullName} onChange={(e) => setFullName(e.target.value)} />
+            <HospitalSelectForNurses value={hospitalId} onChange={setHospitalId} session={session} setSession={setSession} />
+            <button className="primary" onClick={createNurse} disabled={busy}>{busy ? 'Creating…' : 'Create nurse'}</button>
+            {error && <div className="err" style={{ fontSize: 13 }}>{error}</div>}
+          </div>
+          {created && (
+            <div className="panel" style={{ marginTop: 12, borderColor: 'var(--green)' }}>
+              <h2>Nurse created — credentials (shown once)</h2>
+              <div className="event-log"><div>login: <b>{created.email}</b> / password: <b>{created.password}</b></div></div>
+              <button style={{ marginTop: 8 }} onClick={() => setCreated(null)}>close</button>
+            </div>
+          )}
+        </div>
+        <div>
+          <h2>Nurse accounts</h2>
+          <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+            <table>
+              <thead><tr><th>name</th><th>login email</th><th>hospital</th><th></th></tr></thead>
+              <tbody>
+                {nurses.map((n) => (
+                  <tr key={n.userId}>
+                    <td>{n.fullName ?? '—'}</td>
+                    <td style={{ fontFamily: 'ui-monospace, monospace' }}>{n.username}</td>
+                    <td>{n.hospitalName ?? n.hospitalId ?? '—'}</td>
+                    <td><button style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => void removeNurse(n.userId)}>remove</button></td>
+                  </tr>
+                ))}
+                {nurses.length === 0 && <tr><td colSpan={4} style={{ color: 'var(--muted)' }}>no nurse accounts yet</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Small helper: hospital dropdown for the nurse create form (fetches hospitals once). */
+function HospitalSelectForNurses({ value, onChange, session, setSession }: { value: string; onChange: (v: string) => void; session: Session; setSession: (s: Session) => void }) {
+  const [hospitals, setHospitals] = useState<HospitalView[]>([]);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await api(session, setSession, '/api/hospitals');
+        const body = await res.json();
+        if (res.ok) setHospitals(body);
+      } catch { /* starting up */ }
+    })();
+  }, [session?.accessToken]);
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">assigned hospital…</option>
+      {hospitals.map((h) => <option key={h.siteId} value={h.siteId}>{h.name} ({h.siteId})</option>)}
+    </select>
   );
 }
 
@@ -1746,6 +1980,10 @@ function App() {
     return <PatientPortal session={session} setSession={setSession} onLogout={logout} />;
   }
 
+  if (session.role === 'nurse') {
+    return <NursePage session={session} setSession={setSession} onLogout={logout} />;
+  }
+
   return (
     <div className="app">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1761,6 +1999,7 @@ function App() {
       </div>
 
       {canAdminManage && <AdminSection session={session} setSession={setSession} onRefresh={() => void refresh()} onOpenHospital={(siteId) => setViewingHospital(siteId)} />}
+      {(session.role === 'admin' || session.role === 'doctor') && <NursesPanel session={session} setSession={setSession} />}
       {(session.role === 'admin' || session.role === 'doctor') && <PatientsPanel session={session} setSession={setSession} />}
 
       <div className="grid cols-3" style={{ marginBottom: 16 }}>

@@ -16,7 +16,8 @@ export class UserStore {
                 username: u.username,
                 passwordHash: hashPassword(u.password),
                 role: u.role,
-                ...(u.role === 'doctor' ? { hospitalId: u.hospitalId, fullName: u.fullName } : {}),
+                ...(u.hospitalId ? { hospitalId: u.hospitalId } : {}),
+                ...(u.fullName ? { fullName: u.fullName } : {}),
             };
             this.users.set(u.userId, rec);
             this.byUsername.set(u.username, u.userId);
@@ -66,7 +67,8 @@ export class UserStore {
             username,
             passwordHash: hashPassword(password),
             role,
-            ...(role === 'doctor' ? { hospitalId, fullName } : {}),
+            ...(hospitalId ? { hospitalId } : {}),
+            ...(fullName ? { fullName } : {}),
         };
         this.users.set(id, rec);
         this.byUsername.set(username, id);

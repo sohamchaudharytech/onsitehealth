@@ -4,9 +4,9 @@ export interface UserRecord {
     username: string;
     passwordHash: string;
     role: Role;
-    /** doctors only: hospital this doctor is affiliated with */
+    /** doctors: affiliated hospital; nurses: assigned hospital */
     hospitalId?: string;
-    /** doctors only: display name */
+    /** doctors: display name; nurses: display name */
     fullName?: string;
 }
 export interface RefreshRecord {

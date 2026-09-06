@@ -90,6 +90,7 @@ All dashboard/API access is authenticated. Demo accounts (seeded at startup):
 | `viewer` | `viewer123` | viewer |
 | `doctor` | `doctor123` | doctor (Doctor Portal — publishes drug-interaction rules) |
 | `ava.thompson@demo.health` | `patient12345` | patient (read-only Patient Portal — demo patient P-000123) |
+| `nurse@demo.health` | `nurse12345` | nurse (Nurse Dashboard — masked patient lookup) |
 
 **Auth flow:** `POST /api/auth/login` → 15-min HS256 JWT access token
 (`{userId, username, role}`) + opaque refresh token. Refresh tokens are stored
@@ -110,6 +111,8 @@ auto-refreshes on 401 and supports logout. Passwords are scrypt-hashed.
 | `hospitals:manage` | admin |
 | `formulary:manage` (provision drugs) | admin, doctor |
 | `patients:manage` (create/edit patients) | admin, doctor |
+| `nurses:manage` (create nurse accounts) | admin, doctor |
+| `patients:lookup` (masked patient summary) | nurse |
 
 The dashboard disables buttons the current role can't use (with a tooltip
 explaining why); the server enforces the same matrix regardless of client.
@@ -201,6 +204,10 @@ PATCH /api/patients/:patientId      — update fields/credentials; history appen
 POST /api/patients/:patientId/visits — record a hospital visit (admin/doctor)
 POST /api/patients/:patientId/deactivate — soft delete; history preserved (admin/doctor)
 POST /api/patients/:patientId/reactivate — restore access (admin/doctor)
+POST /api/patients/lookup          — masked patient summary by portal email (nurse)
+GET  /api/nurses                    — list nurse accounts (admin/doctor)
+POST /api/nurses                    — create nurse account (admin/doctor)
+DELETE /api/nurses/:userId          — remove nurse account (admin/doctor)
 GET  /api/reference/rules?latest=1  — latest rule versions with attribution
 GET  /api/epoch                     — current global active epoch (coordinator)
 GET  /api/watermarks                — all site watermarks + epoch (coordinator)
@@ -226,6 +233,10 @@ human-readable ID (P-000123). Every change is appended as a history block
 (before/after values) and mirrored into the hash-chained ledger — there is
 NO hard delete, only deactivation. Hospital visits are tracked with time,
 reason, and who recorded them; admins/doctors see the visit trail.
+**Nurses:** nurse accounts are created by admin/doctor. The nurse enters a
+patient's portal email and sees ONLY a masked summary — name half-hidden
+(Rock → R**k), age, gender, condition, drugs, and last visit date/reason.
+No IDs, DOB, history, or contact details are exposed to nurses.
 
 **Simulated hospitals for scale testing:** each generated hospital runs a
 real in-process agent (identical `/internal/push` + `/internal/evaluate`

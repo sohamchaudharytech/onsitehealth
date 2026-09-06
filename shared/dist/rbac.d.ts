@@ -8,12 +8,15 @@ export declare const PERMISSIONS: {
     readonly 'reference:publish': readonly ["admin", "doctor"];
     readonly 'sites:manage': readonly ["admin"];
     readonly 'orders:submit': readonly ["admin", "operator"];
-    readonly 'dashboard:view': readonly ["admin", "operator", "auditor", "viewer", "doctor", "patient"];
+    readonly 'dashboard:view': readonly ["admin", "operator", "auditor", "viewer", "doctor", "patient", "nurse"];
     readonly 'audit:view': readonly ["admin", "auditor"];
     readonly 'users:manage': readonly ["admin"];
     readonly 'hospitals:manage': readonly ["admin"];
     readonly 'formulary:manage': readonly ["admin", "doctor"];
     readonly 'patients:manage': readonly ["admin", "doctor"];
+    readonly 'nurses:manage': readonly ["admin", "doctor"];
+    /** Nurse lookup: masked, minimal patient view by portal email. */
+    readonly 'patients:lookup': readonly ["nurse"];
 };
 export type Permission = keyof typeof PERMISSIONS;
 export declare function can(role: Role | undefined, permission: Permission): boolean;

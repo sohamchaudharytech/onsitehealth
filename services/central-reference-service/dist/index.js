@@ -33,6 +33,18 @@ function slugify(name) {
 function pickNetwork(s) {
     return { baseLatencyMs: s.baseLatencyMs, jitterMs: s.jitterMs, dropRate: s.dropRate };
 }
+/** Age in years from an ISO dob, as of today. */
+function calcAge(dob) {
+    const d = new Date(dob);
+    if (Number.isNaN(d.getTime()))
+        return 0;
+    const now = new Date();
+    let age = now.getFullYear() - d.getFullYear();
+    const m = now.getMonth() - d.getMonth();
+    if (m < 0 || (m === 0 && now.getDate() < d.getDate()))
+        age--;
+    return age;
+}
 // Demo users — one per RBAC role so every permission row is demonstrable.
 const users = new UserStore([
     { userId: 'user-admin', username: 'admin', password: 'admin123', role: 'admin' },
@@ -40,6 +52,7 @@ const users = new UserStore([
     { userId: 'user-auditor', username: 'auditor', password: 'auditor123', role: 'auditor' },
     { userId: 'user-viewer', username: 'viewer', password: 'viewer123', role: 'viewer' },
     { userId: 'user-doctor', username: 'doctor', password: 'doctor123', role: 'doctor', hospitalId: 'site-a', fullName: 'Dr. Demo Physician' },
+    { userId: 'user-nurse', username: 'nurse@demo.health', password: 'nurse12345', role: 'nurse', hospitalId: 'site-a', fullName: 'Nurse Demo Rivera' },
 ]);
 // ── Patient registry (demo seed — one patient so the portal is testable) ─────
 const patients = new PatientStore();
@@ -893,6 +906,82 @@ app.post('/api/patients/:patientId/reactivate', requirePermission('patients:mana
     }
     ledger.append('PATIENT_UPDATED', { patientId: rec.patientId, patientRef: rec.data.patientRef, changedBy: editor?.username, reason: 'reactivated', changes: { status: { before: 'deactivated', after: 'active' } } });
     res.json({ ok: true, status: 'active' });
+});
+// ── Nurses (admin & doctor create nurse accounts) ───────────────────────────
+app.get('/api/nurses', requirePermission('nurses:manage'), (_req, res) => {
+    const hospitals = new Map(store.listHospitals().map((h) => [h.siteId, h.name]));
+    res.json(users.list()
+        .filter((u) => u.role === 'nurse')
+        .map((n) => ({ ...n, hospitalName: n.hospitalId ? hospitals.get(n.hospitalId) ?? null : null })));
+});
+app.post('/api/nurses', requirePermission('nurses:manage'), (req, res) => {
+    const { email, password, fullName, hospitalId } = req.body ?? {};
+    if (typeof email !== 'string' || !EMAIL_RE.test(email.trim())) {
+        res.status(400).json({ error: 'a valid nurse login email is required' });
+        return;
+    }
+    if (typeof password !== 'string' || password.length < 8) {
+        res.status(400).json({ error: 'password (min 8 chars) required' });
+        return;
+    }
+    const mail = email.trim().toLowerCase();
+    if (users.usernameTaken(mail)) {
+        res.status(409).json({ error: `email '${mail}' is already in use` });
+        return;
+    }
+    if (typeof hospitalId !== 'string' || !store.getHospital(hospitalId.trim())) {
+        res.status(400).json({ error: 'hospitalId must reference an existing hospital' });
+        return;
+    }
+    const user = users.create(mail, password, 'nurse', hospitalId.trim(), typeof fullName === 'string' && fullName.trim() ? fullName.trim() : undefined);
+    ledger.append('NURSE_ADDED', { userId: user.userId, email: mail, hospitalId: user.hospitalId, fullName: user.fullName, createdBy: req.user.username });
+    broadcast({ type: 'DOCTOR', data: { action: 'nurse-added', email: mail }, ts: new Date().toISOString() });
+    res.status(201).json({ userId: user.userId, email: user.username, fullName: user.fullName, hospitalId: user.hospitalId });
+});
+app.delete('/api/nurses/:userId', requirePermission('nurses:manage'), (req, res) => {
+    const user = users.get(req.params.userId);
+    if (!user || user.role !== 'nurse') {
+        res.status(404).json({ error: 'nurse not found' });
+        return;
+    }
+    const removed = users.deleteUser(req.params.userId);
+    ledger.append('USER_REMOVED', { userId: removed.userId, username: removed.username, role: removed.role });
+    res.json({ ok: true, ...removed });
+});
+// ── Nurse lookup: masked, minimal patient view by portal email ───────────────
+// The nurse takes the patient's email and gets ONLY: masked name (r**k),
+// age, gender, condition, drugs, and last visit (date + reason). No IDs,
+// no DOB, no history, no contact details — a deliberate privacy filter.
+function maskName(name) {
+    const n = name.trim();
+    if (n.length <= 2)
+        return n; // too short to mask meaningfully
+    return n[0] + '*'.repeat(n.length - 2) + n[n.length - 1];
+}
+app.post('/api/patients/lookup', requirePermission('patients:lookup'), (req, res) => {
+    const { email } = req.body ?? {};
+    if (typeof email !== 'string' || !EMAIL_RE.test(email.trim())) {
+        res.status(400).json({ error: 'a valid patient portal email is required' });
+        return;
+    }
+    const rec = patients.getByEmail(email.trim());
+    if (!rec) {
+        // do not reveal whether the email exists — uniform response
+        res.status(404).json({ error: 'no patient found for this email' });
+        return;
+    }
+    const visits = patients.visitsOf(rec.patientId);
+    const last = visits[0] ?? null; // visitsOf sorts newest-first
+    res.json({
+        maskedName: `${maskName(rec.data.firstName)} ${maskName(rec.data.lastName)}`,
+        age: calcAge(rec.data.dob),
+        gender: rec.data.gender,
+        disease: rec.data.disease,
+        drugs: rec.data.drugs,
+        lastVisit: last
+            ? { at: last.visitedAt, reason: last.reason, hospitalName: store.getHospital(last.hospitalId)?.name ?? last.hospitalId }
+            : null,
+    });
 });
 // ── Audit ledger ─────────────────────────────────────────────────────────────
 app.get('/api/audit', requirePermission('audit:view'), (req, res) => {
