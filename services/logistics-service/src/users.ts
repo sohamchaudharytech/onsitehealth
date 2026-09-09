@@ -26,6 +26,24 @@ export class UserStore {
   private byUsername = new Map<string, string>();
   private refreshTokens = new Map<string, RefreshRecord>(); // key = tokenHash
 
+  snapshot() {
+    return {
+      users: [...this.users.values()],
+      refreshTokens: [...this.refreshTokens.values()],
+    };
+  }
+
+  restore(snapshot: ReturnType<UserStore['snapshot']>): void {
+    this.users.clear();
+    this.byUsername.clear();
+    this.refreshTokens.clear();
+    for (const user of snapshot.users) {
+      this.users.set(user.userId, user);
+      this.byUsername.set(user.username, user.userId);
+    }
+    for (const token of snapshot.refreshTokens) this.refreshTokens.set(token.tokenHash, token);
+  }
+
   constructor(
     seed: Array<{ userId: string; username: string; password: string; role: Role; fullName?: string }>,
   ) {

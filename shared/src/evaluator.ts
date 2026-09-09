@@ -38,12 +38,24 @@ export class EpochGatedEvaluator {
   private engine: RuleEngine;
   private knownEpoch = 0;
 
+  snapshot(): { knownEpoch: number } {
+    return { knownEpoch: this.knownEpoch };
+  }
+
+  restore(snapshot: { knownEpoch: number }): void {
+    this.setEpoch(snapshot.knownEpoch);
+  }
+
   constructor(engine: RuleEngine = new DrugInteractionEngine()) {
     this.engine = engine;
   }
 
-  setEpoch(epochSeq: number): void {
-    if (epochSeq > this.knownEpoch) this.knownEpoch = epochSeq;
+  setEpoch(epochSeq: number): boolean {
+    if (epochSeq > this.knownEpoch) {
+      this.knownEpoch = epochSeq;
+      return true;
+    }
+    return false;
   }
 
   getKnownEpoch(): number {

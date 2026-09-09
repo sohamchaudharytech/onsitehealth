@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { verifyJwt } from './auth.js';
+import { sha256Hex, verifyJwt } from './auth.js';
 /** Request-id + structured logging with correlation (PRD §7.7). */
 export function requestLogger() {
     return (req, res, next) => {
@@ -47,7 +47,7 @@ export function jwtAuth(secret) {
 export function internalKeyGuard(internalKey) {
     return (req, res, next) => {
         const provided = req.headers['x-internal-key'];
-        if (typeof provided !== 'string' || provided !== internalKey) {
+        if (typeof provided !== 'string' || sha256Hex(provided) !== sha256Hex(internalKey)) {
             res.status(401).json({ error: 'invalid internal key' });
             return;
         }

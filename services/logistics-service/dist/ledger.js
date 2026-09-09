@@ -15,6 +15,12 @@ export function sha256(input) {
 }
 export class HashChainLedger {
     blocks = [];
+    snapshot() {
+        return this.blocks;
+    }
+    restore(blocks) {
+        this.blocks = blocks;
+    }
     get length() {
         return this.blocks.length;
     }

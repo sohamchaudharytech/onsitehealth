@@ -1,4 +1,7 @@
 import type { AuditBlock } from '@hc/shared';
+import type { CentralStore } from './store.js';
+import type { PatientStore } from './patients.js';
+import type { UserStore } from './users.js';
 /**
  * File-backed durability for the central service (Phase 7-lite).
  *
@@ -36,6 +39,15 @@ export type RefreshEvent = {
 };
 export declare function persistRefreshEvent(ev: RefreshEvent): void;
 export declare function loadRefreshEvents(): RefreshEvent[];
+export interface DomainStateSnapshot {
+    version: 1;
+    savedAt: string;
+    central: ReturnType<CentralStore['snapshot']>;
+    users: ReturnType<UserStore['snapshot']>;
+    patients: ReturnType<PatientStore['snapshot']>;
+}
+export declare function loadDomainSnapshot(): DomainStateSnapshot | null;
+export declare function persistDomainSnapshot(snapshot: DomainStateSnapshot): void;
 /** Wipe persisted state (used by tests / fresh-start script). */
 export declare function resetPersistence(): void;
 //# sourceMappingURL=persistence.d.ts.map

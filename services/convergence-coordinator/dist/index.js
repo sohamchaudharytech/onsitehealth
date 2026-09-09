@@ -2,12 +2,15 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import { errorHandler, internalKeyGuard, jwtAuth, requestLogger, sanitizeBody, SlidingWindowLimiter, defaultRateLimitRules, verifyJwt, } from '@hc/shared';
+import { loadCoordinatorState, persistCoordinatorState } from './persistence.js';
 import { CoordinatorState } from './state.js';
 const PORT = Number(process.env.PORT ?? 4002);
 const CENTRAL_URL = process.env.CENTRAL_URL ?? 'http://localhost:4001';
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
 const INTERNAL_KEY = process.env.INTERNAL_KEY ?? 'dev-internal-key';
 const state = new CoordinatorState();
+loadCoordinatorState(state);
+persistCoordinatorState(state);
 // ── Live event fan-out ────────────────────────────────────────────────────────
 const liveClients = new Set();
 function broadcast(e) {
@@ -56,6 +59,7 @@ app.post('/internal/ack', internalKeyGuard(INTERNAL_KEY), (req, res) => {
         watermarkSeq,
         lastAckAt: new Date().toISOString(),
     });
+    persistCoordinatorState(state);
     broadcast({ type: 'WATERMARK', data: { siteId, watermarkSeq }, ts: new Date().toISOString() });
     res.json({ advanced, epoch });
 });
@@ -74,6 +78,7 @@ app.post('/internal/sites/remove', internalKeyGuard(INTERNAL_KEY), (req, res) =>
         return;
     }
     state.removeSite(siteId);
+    persistCoordinatorState(state);
     broadcast({ type: 'WATERMARK', data: { siteId, watermarkSeq: -1, removed: true }, ts: new Date().toISOString() });
     res.json({ ok: true });
 });
@@ -89,7 +94,6 @@ app.get('/api/sites', (_req, res) => {
 app.get('/api/watermarks', (_req, res) => {
     res.json({ watermarks: state.getWatermarks(), epoch: state.getEpoch() });
 });
-app.get('/healthz', (_req, res) => res.json({ ok: true, service: 'convergence-coordinator' }));
 app.use(errorHandler('coordinator'));
 const server = app.listen(PORT, () => {
     console.log(`[convergence-coordinator] listening on :${PORT}`);

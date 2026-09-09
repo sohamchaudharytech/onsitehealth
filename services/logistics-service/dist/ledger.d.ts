@@ -18,6 +18,8 @@ export declare function canonicalJson(value: unknown): string;
 export declare function sha256(input: string): string;
 export declare class HashChainLedger {
     private blocks;
+    snapshot(): AuditBlock[];
+    restore(blocks: AuditBlock[]): void;
     get length(): number;
     append(eventType: LogisticsEventType, payload: Record<string, unknown>): AuditBlock;
     private blockHash;

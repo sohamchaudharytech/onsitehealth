@@ -9,6 +9,11 @@ export declare class ShipmentStore {
     private shipments;
     private byOrderCode;
     private seq;
+    snapshot(): {
+        shipments: Shipment[];
+        seq: number;
+    };
+    restore(snapshot: ReturnType<ShipmentStore['snapshot']>): void;
     create(input: {
         orderCode: string;
         drugName: string;

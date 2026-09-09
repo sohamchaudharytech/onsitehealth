@@ -9,6 +9,17 @@ export class UserStore {
     users = new Map();
     byUsername = new Map();
     refreshTokens = new Map(); // key = tokenHash
+    snapshot() {
+        return [...this.users.values()].map((user) => ({ ...user }));
+    }
+    restoreUsers(records) {
+        this.users.clear();
+        this.byUsername.clear();
+        for (const record of records) {
+            this.users.set(record.userId, { ...record });
+            this.byUsername.set(record.username, record.userId);
+        }
+    }
     constructor(seed) {
         for (const u of seed) {
             const rec = {

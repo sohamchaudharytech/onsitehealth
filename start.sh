@@ -145,18 +145,18 @@ start_service() {
 }
 
 # 1. Convergence Coordinator (port 4002)
-start_service "coordinator" "PORT=4002 CENTRAL_URL=http://localhost:4001 npx tsx services/convergence-coordinator/src/index.ts"
+start_service "coordinator" "PORT=4002 CENTRAL_URL=http://localhost:4001 STATE_PATH='$SCRIPT_DIR/.data/coordinator.json' npx tsx services/convergence-coordinator/src/index.ts"
 
 # 2. Central Reference Service (port 4001)
 start_service "central" "PORT=4001 SITE_HOSTS='localhost:4101,localhost:4102,localhost:4103' COORDINATOR_URL=http://localhost:4002 REDIS_URL=redis://localhost:6379 DATA_DIR='$SCRIPT_DIR/.data' npx tsx services/central-reference-service/src/index.ts"
 
 # 3. Logistics Service (port 4301)
-start_service "logistics" "PORT=4301 REDIS_URL=redis://localhost:6379 npx tsx services/logistics-service/src/index.ts"
+start_service "logistics" "PORT=4301 REDIS_URL=redis://localhost:6379 STATE_PATH='$SCRIPT_DIR/.data/logistics.json' npx tsx services/logistics-service/src/index.ts"
 
 # 4. Site Agents (ports 4101, 4102, 4103)
-start_service "site-a" "SITE_ID=site-a PORT=4101 COORDINATOR_URL=http://localhost:4002 CENTRAL_URL=http://localhost:4001 npx tsx services/site-agent/src/index.ts"
-start_service "site-b" "SITE_ID=site-b PORT=4102 COORDINATOR_URL=http://localhost:4002 CENTRAL_URL=http://localhost:4001 npx tsx services/site-agent/src/index.ts"
-start_service "site-c" "SITE_ID=site-c PORT=4103 COORDINATOR_URL=http://localhost:4002 CENTRAL_URL=http://localhost:4001 npx tsx services/site-agent/src/index.ts"
+start_service "site-a" "SITE_ID=site-a PORT=4101 COORDINATOR_URL=http://localhost:4002 CENTRAL_URL=http://localhost:4001 STATE_PATH='$SCRIPT_DIR/.data/site-a.json' npx tsx services/site-agent/src/index.ts"
+start_service "site-b" "SITE_ID=site-b PORT=4102 COORDINATOR_URL=http://localhost:4002 CENTRAL_URL=http://localhost:4001 STATE_PATH='$SCRIPT_DIR/.data/site-b.json' npx tsx services/site-agent/src/index.ts"
+start_service "site-c" "SITE_ID=site-c PORT=4103 COORDINATOR_URL=http://localhost:4002 CENTRAL_URL=http://localhost:4001 STATE_PATH='$SCRIPT_DIR/.data/site-c.json' npx tsx services/site-agent/src/index.ts"
 
 # 5. Main Clinical Dashboard (port 5173)
 start_service "dashboard" "cd dashboard && npm run dev"

@@ -1,5 +1,11 @@
 import type { ReferenceRuleVersion, ReferenceSnapshot } from '@hc/shared';
 
+export interface SiteCacheSnapshot {
+  version: 1;
+  rules: Record<string, ReferenceRuleVersion[]>;
+  watermark: number;
+}
+
 /**
  * Local site cache with a short version history per rule — NOT just the
  * latest — so it can reconstruct "the world as of globalSeq N" even after
@@ -10,6 +16,24 @@ export class SiteCache {
   private history = new Map<string, ReferenceRuleVersion[]>();
   /** highest globalSeq durably stored locally */
   private watermark = 0;
+
+  snapshot(): SiteCacheSnapshot {
+    return {
+      version: 1,
+      rules: Object.fromEntries([...this.history].map(([ruleId, versions]) => [ruleId, versions])),
+      watermark: this.watermark,
+    };
+  }
+
+  restore(snapshot: SiteCacheSnapshot): void {
+    if (snapshot.version !== 1) throw new Error(`unsupported SiteCache snapshot version: ${snapshot.version}`);
+    this.history.clear();
+    for (const [ruleId, versions] of Object.entries(snapshot.rules)) {
+      const sorted = [...versions].sort((a, b) => a.globalSeq - b.globalSeq);
+      this.history.set(ruleId, sorted);
+    }
+    this.watermark = Math.max(0, snapshot.watermark);
+  }
 
   ingest(rec: ReferenceRuleVersion): { isNew: boolean; watermark: number } {
     const arr = this.history.get(rec.ruleId) ?? [];

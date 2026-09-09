@@ -1,5 +1,11 @@
 import type { GlobalEpoch, SiteWatermark } from '@hc/shared';
 
+export interface CoordinatorSnapshot {
+  version: 1;
+  watermarks: SiteWatermark[];
+  epoch: GlobalEpoch;
+}
+
 /**
  * Computes the single global "safe to use" version:
  *   globalActiveEpoch = min(watermark_A, watermark_B, ...)
@@ -10,6 +16,21 @@ export class CoordinatorState {
   private watermarks = new Map<string, SiteWatermark>();
   private epoch: GlobalEpoch = { epochSeq: 0, updatedAt: new Date().toISOString() };
   private onChange: ((epoch: GlobalEpoch) => void) | null = null;
+
+  snapshot(): CoordinatorSnapshot {
+    return {
+      version: 1,
+      watermarks: this.getWatermarks(),
+      epoch: this.epoch,
+    };
+  }
+
+  restore(snapshot: CoordinatorSnapshot): void {
+    if (snapshot.version !== 1) throw new Error(`unsupported coordinator snapshot version: ${snapshot.version}`);
+    this.watermarks.clear();
+    for (const watermark of snapshot.watermarks) this.watermarks.set(watermark.siteId, watermark);
+    this.epoch = snapshot.epoch;
+  }
 
   setOnChange(cb: (epoch: GlobalEpoch) => void): void {
     this.onChange = cb;

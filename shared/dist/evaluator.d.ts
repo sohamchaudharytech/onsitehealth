@@ -31,8 +31,14 @@ import type { SiteCache } from './cache.js';
 export declare class EpochGatedEvaluator {
     private engine;
     private knownEpoch;
+    snapshot(): {
+        knownEpoch: number;
+    };
+    restore(snapshot: {
+        knownEpoch: number;
+    }): void;
     constructor(engine?: RuleEngine);
-    setEpoch(epochSeq: number): void;
+    setEpoch(epochSeq: number): boolean;
     getKnownEpoch(): number;
     /**
      * @param orderEpoch epoch stamped on the order at submission time by the

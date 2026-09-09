@@ -52,6 +52,14 @@ export function sha256(input: string): string {
 export class HashChainLedger {
   private blocks: AuditBlock[] = [];
 
+  snapshot(): AuditBlock[] {
+    return this.blocks;
+  }
+
+  restore(blocks: AuditBlock[]): void {
+    this.blocks = blocks;
+  }
+
   get length(): number {
     return this.blocks.length;
   }

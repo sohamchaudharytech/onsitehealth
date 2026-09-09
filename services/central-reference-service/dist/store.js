@@ -14,6 +14,39 @@ export class CentralStore {
     nextSimNumber = new Map();
     /** hospital formulary: drug id -> record */
     drugs = new Map();
+    snapshot() {
+        return {
+            rules: [...this.bySeq.values()],
+            nextGlobalSeq: this.nextGlobalSeq,
+            sites: [...this.sites.values()],
+            hospitals: [...this.hospitals.values()],
+            nextSimNumber: [...this.nextSimNumber.entries()],
+            drugs: [...this.drugs.values()],
+        };
+    }
+    restore(snapshot) {
+        this.rules.clear();
+        this.bySeq.clear();
+        this.sites.clear();
+        this.hospitals.clear();
+        this.nextSimNumber.clear();
+        this.drugs.clear();
+        for (const rec of snapshot.rules) {
+            const versions = this.rules.get(rec.ruleId) ?? new Map();
+            versions.set(rec.version, rec);
+            this.rules.set(rec.ruleId, versions);
+            this.bySeq.set(rec.globalSeq, rec);
+        }
+        this.nextGlobalSeq = Math.max(1, snapshot.nextGlobalSeq);
+        for (const rec of snapshot.sites)
+            this.registerSite(rec);
+        for (const rec of snapshot.hospitals)
+            this.registerHospital(rec);
+        for (const [key, value] of snapshot.nextSimNumber)
+            this.nextSimNumber.set(key, value);
+        for (const rec of snapshot.drugs)
+            this.addDrugToHospital(rec);
+    }
     publish(ruleId, payload, publishedBy) {
         const versions = this.rules.get(ruleId) ?? new Map();
         const version = versions.size + 1;

@@ -298,11 +298,13 @@ at scale — the acceptance demo passes identically at 250 hospitals.
   structure inside a blockchain, without decentralized consensus. That's the
   correct tool for tamper-evidence here; calling it "a blockchain" would be
   the overclaim.
-- Central rules, sites, hospitals, formularies, users, and patients now restore
-  from an atomic JSON snapshot in `.data/state.json`; the ledger and refresh events
-  use append-only JSONL. Site/coordinator caches and logistics remain in-memory,
-  so a full stack restart still requires rule replay/ACKs for site convergence.
-  MongoDB persistence remains a later production phase.
+- Central rules, sites, hospitals, formularies, users, and patients restore from
+  an atomic JSON snapshot; the ledger and refresh events use append-only JSONL.
+  Coordinator watermarks/epochs and each site's rule history also restore from
+  atomic snapshots, so convergence survives individual service restarts. Logistics
+  shipments, users, refresh tokens, and its audit chain also restore from an
+  atomic snapshot. Clinical evaluation results remain in-memory. MongoDB
+  persistence remains a later production phase.
 - The **rate limiter is Redis-backed** (`shared/src/redislimit.ts`): an
   atomic Lua sliding-window over sorted sets, shared across ALL service
   instances — two instances behind one limit, not one limit each. Redis

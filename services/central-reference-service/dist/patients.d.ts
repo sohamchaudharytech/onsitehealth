@@ -16,6 +16,32 @@ export declare class PatientStore {
     private visits;
     private nextChangeSeq;
     private nextRefNum;
+    snapshot(): {
+        patients: {
+            patientId: string;
+            email: string;
+            data: PatientData;
+            createdAt: string;
+            createdBy: {
+                userId: string;
+                username: string;
+                role: string;
+            } | null;
+            linkedUserIds: string[];
+            status: "active" | "deactivated";
+        }[];
+        history: {
+            patientId: string;
+            blocks: PatientChangeBlock[];
+        }[];
+        visits: {
+            patientId: string;
+            visits: PatientVisit[];
+        }[];
+        nextChangeSeq: number;
+        nextRefNum: number;
+    };
+    restore(snapshot: ReturnType<PatientStore['snapshot']>): void;
     /** Allocate the next human-readable id: P-000123 style, zero-padded to 6. */
     allocatePatientRef(): string;
     /** Seed a pre-allocated ref (e.g. demo data) — bumps the counter past it. */

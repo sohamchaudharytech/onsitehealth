@@ -11,6 +11,23 @@ export class ShipmentStore {
   private byOrderCode = new Map<string, string>();
   private seq = 0;
 
+  snapshot() {
+    return {
+      shipments: [...this.shipments.values()],
+      seq: this.seq,
+    };
+  }
+
+  restore(snapshot: ReturnType<ShipmentStore['snapshot']>): void {
+    this.shipments.clear();
+    this.byOrderCode.clear();
+    this.seq = Math.max(0, snapshot.seq);
+    for (const shipment of snapshot.shipments) {
+      this.shipments.set(shipment.shipmentId, shipment);
+      this.byOrderCode.set(shipment.orderCode, shipment.shipmentId);
+    }
+  }
+
   create(input: {
     orderCode: string;
     drugName: string;

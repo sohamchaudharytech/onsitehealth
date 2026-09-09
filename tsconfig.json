@@ -5,6 +5,7 @@
     { "path": "services/central-reference-service" },
     { "path": "services/convergence-coordinator" },
     { "path": "services/site-agent" },
-    { "path": "services/logistics-service" }
+    { "path": "services/logistics-service" },
+    { "path": "dashboard-logistics" }
   ]
 }

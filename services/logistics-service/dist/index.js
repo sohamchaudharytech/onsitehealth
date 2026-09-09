@@ -5,6 +5,7 @@ import { defaultRateLimitRules, errorHandler, internalKeyGuard, jwtAuth, request
 import { ShipmentStore, haversine } from './store.js';
 import { UserStore } from './users.js';
 import { HashChainLedger } from './ledger.js';
+import { loadLogisticsState, persistLogisticsState } from './persistence.js';
 import { advanceProgress, etaMinutes, fractionAlong, interpolate } from './sim.js';
 const PORT = Number(process.env.PORT ?? 4301);
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
@@ -22,6 +23,15 @@ const users = new UserStore([
     { userId: 'u-view', username: 'viewer', password: 'viewer123', role: 'viewer', fullName: 'Hospital Pharmacist' },
 ]);
 const ledger = new HashChainLedger();
+let demoSeq = 0;
+function saveState() {
+    persistLogisticsState({
+        shipments: shipments.snapshot(),
+        users: users.snapshot(),
+        ledger: ledger.snapshot(),
+        demoSeq,
+    });
+}
 // ── Live event fan-out (WebSocket) ────────────────────────────────────────────
 const liveClients = new Set();
 function broadcast(e) {
@@ -73,7 +83,15 @@ function seedShipments() {
     }
     ledger.append('SHIPMENT_SEEDED', { count: 5 });
 }
-seedShipments();
+const restoredState = loadLogisticsState(shipments, users, ledger);
+if (restoredState) {
+    demoSeq = restoredState.demoSeq;
+    console.log(`[logistics-service] restored ${restoredState.shipments.shipments.length} shipments and ${restoredState.ledger.length} ledger blocks from disk`);
+}
+else {
+    seedShipments();
+    saveState();
+}
 // ── Demo loop: keep the map alive ────────────────────────────────────────────
 // When every shipment has arrived (or is waiting at the depot), dispatch a
 // fresh batch so the dashboard always shows live movement. Disabled by
@@ -95,7 +113,6 @@ const DEMO_DRUGS = [
     ['Amoxicillin 500mg', false],
     ['Erythropoietin', true],
 ];
-let demoSeq = 0;
 function dispatchDemoBatch() {
     const count = 2 + Math.floor(Math.random() * 2); // 2-3 new shipments
     for (let i = 0; i < count; i++) {
@@ -123,6 +140,7 @@ function dispatchDemoBatch() {
             ts: new Date().toISOString(),
         });
     }
+    saveState();
 }
 if (DEMO_LOOP) {
     setInterval(() => {
@@ -178,6 +196,7 @@ setInterval(() => {
             }
         }
     }
+    saveState();
 }, SIM_TICK_MS);
 // ── Middleware pipeline (same order as the clinical services) ─────────────────
 const limiter = new SlidingWindowLimiter(defaultRateLimitRules());
@@ -204,6 +223,7 @@ app.post('/api/auth/login', (req, res) => {
     const accessToken = signJwt({ userId: user.userId, username: user.username, role: user.role }, JWT_SECRET, ACCESS_TOKEN_TTL_SEC);
     const refreshToken = users.issueRefreshToken(user.userId);
     ledger.append('USER_LOGIN', { username: user.username, role: user.role });
+    saveState();
     res.json({
         accessToken,
         refreshToken,
@@ -223,6 +243,7 @@ app.post('/api/auth/refresh', (req, res) => {
         res.status(401).json({ error: 'refresh token invalid, expired, or reused (family revoked)' });
         return;
     }
+    saveState();
     const user = users.get(rotated.userId);
     if (!user) {
         res.status(401).json({ error: 'user no longer exists' });
@@ -239,6 +260,7 @@ app.post('/api/auth/refresh', (req, res) => {
 });
 app.post('/api/auth/logout', jwtAuth(JWT_SECRET), (req, res) => {
     users.revokeAllForUser(req.user.userId);
+    saveState();
     res.json({ ok: true, revoked: 'all refresh tokens for user' });
 });
 // ── Everything below requires a valid JWT ────────────────────────────────────
@@ -298,6 +320,7 @@ app.post('/api/shipments', requirePermission('orders:submit'), (req, res) => {
         ts: new Date().toISOString(),
     });
     res.status(201).json({ shipment: view(s) });
+    saveState();
 });
 app.post('/api/shipments/:shipmentId/status', requirePermission('orders:submit'), (req, res) => {
     const { to } = req.body ?? {};
@@ -340,6 +363,7 @@ app.post('/api/shipments/:shipmentId/status', requirePermission('orders:submit')
         ts: new Date().toISOString(),
     });
     res.json({ shipment: view(t.shipment) });
+    saveState();
 });
 // ── Audit ledger ─────────────────────────────────────────────────────────────
 app.get('/api/audit', requirePermission('audit:view'), (req, res) => {

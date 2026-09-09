@@ -34,7 +34,9 @@ services:
     environment:
       PORT: "4002"
       CENTRAL_URL: "http://central:4001"
+      STATE_PATH: "/app/.data/coordinator.json"
     ports: ["4002:4002"]
+    volumes: ["./.data:/app/.data"]
 
   site-a:
     build:
@@ -46,6 +48,7 @@ services:
       PORT: "4101"
       COORDINATOR_URL: "http://coordinator:4002"
       CENTRAL_URL: "http://central:4001"
+      STATE_PATH: "/app/.data/site-a.json"
     depends_on: [coordinator, central]
 
   site-b:
@@ -58,6 +61,7 @@ services:
       PORT: "4102"
       COORDINATOR_URL: "http://coordinator:4002"
       CENTRAL_URL: "http://central:4001"
+      STATE_PATH: "/app/.data/site-b.json"
     depends_on: [coordinator, central]
 
   site-c:
@@ -70,6 +74,7 @@ services:
       PORT: "4103"
       COORDINATOR_URL: "http://coordinator:4002"
       CENTRAL_URL: "http://central:4001"
+      STATE_PATH: "/app/.data/site-c.json"
     depends_on: [coordinator, central]
 
   dashboard:
@@ -87,7 +92,9 @@ services:
     environment:
       PORT: "4301"
       REDIS_URL: "redis://redis:6379"
+      STATE_PATH: "/app/.data/logistics.json"
     ports: ["4301:4301"]
+    volumes: ["./.data:/app/.data"]
     depends_on: [redis]
 
   logistics-dashboard:

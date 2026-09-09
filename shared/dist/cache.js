@@ -8,6 +8,23 @@ export class SiteCache {
     history = new Map();
     /** highest globalSeq durably stored locally */
     watermark = 0;
+    snapshot() {
+        return {
+            version: 1,
+            rules: Object.fromEntries([...this.history].map(([ruleId, versions]) => [ruleId, versions])),
+            watermark: this.watermark,
+        };
+    }
+    restore(snapshot) {
+        if (snapshot.version !== 1)
+            throw new Error(`unsupported SiteCache snapshot version: ${snapshot.version}`);
+        this.history.clear();
+        for (const [ruleId, versions] of Object.entries(snapshot.rules)) {
+            const sorted = [...versions].sort((a, b) => a.globalSeq - b.globalSeq);
+            this.history.set(ruleId, sorted);
+        }
+        this.watermark = Math.max(0, snapshot.watermark);
+    }
     ingest(rec) {
         const arr = this.history.get(rec.ruleId) ?? [];
         if (arr.some((r) => r.globalSeq === rec.globalSeq)) {

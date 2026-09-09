@@ -8,6 +8,21 @@ export class CoordinatorState {
     watermarks = new Map();
     epoch = { epochSeq: 0, updatedAt: new Date().toISOString() };
     onChange = null;
+    snapshot() {
+        return {
+            version: 1,
+            watermarks: this.getWatermarks(),
+            epoch: this.epoch,
+        };
+    }
+    restore(snapshot) {
+        if (snapshot.version !== 1)
+            throw new Error(`unsupported coordinator snapshot version: ${snapshot.version}`);
+        this.watermarks.clear();
+        for (const watermark of snapshot.watermarks)
+            this.watermarks.set(watermark.siteId, watermark);
+        this.epoch = snapshot.epoch;
+    }
     setOnChange(cb) {
         this.onChange = cb;
     }

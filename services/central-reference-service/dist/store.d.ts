@@ -28,6 +28,15 @@ export declare class CentralStore {
     private nextSimNumber;
     /** hospital formulary: drug id -> record */
     private drugs;
+    snapshot(): {
+        rules: ReferenceRuleVersion[];
+        nextGlobalSeq: number;
+        sites: SiteRecord[];
+        hospitals: HospitalRecord[];
+        nextSimNumber: [string, number][];
+        drugs: HospitalDrug[];
+    };
+    restore(snapshot: ReturnType<CentralStore['snapshot']>): void;
     publish(ruleId: string, payload: Record<string, unknown>, publishedBy?: RulePublisher): ReferenceRuleVersion;
     setHash(rec: ReferenceRuleVersion, contentHash: string): void;
     allVersions(ruleId: string): ReferenceRuleVersion[];

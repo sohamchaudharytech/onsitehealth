@@ -11,6 +11,7 @@ import {
   type ReferenceRuleVersion,
 } from '@hc/shared';
 import { retryWithBackoff, SiteCache, EpochGatedEvaluator } from '@hc/shared';
+import { loadSiteAgentState, persistSiteAgentState } from './persistence.js';
 
 const SITE_ID = process.env.SITE_ID ?? 'site-a';
 const PORT = Number(process.env.PORT ?? 4101);
@@ -21,6 +22,7 @@ const INTERNAL_KEY = process.env.INTERNAL_KEY ?? 'dev-internal-key';
 const cache = new SiteCache();
 const evaluator = new EpochGatedEvaluator();
 const results = new Map<string, AlertResult[]>();
+loadSiteAgentState(cache, evaluator);
 
 // ── Live event fan-out ────────────────────────────────────────────────────────
 const liveClients = new Set<import('ws').WebSocket>();
@@ -46,7 +48,7 @@ async function ackWatermark(): Promise<void> {
   );
   if (outcome.ok) {
     const { epoch } = outcome.value as { epoch: { epochSeq: number } };
-    evaluator.setEpoch(epoch.epochSeq);
+    if (evaluator.setEpoch(epoch.epochSeq)) persistSiteAgentState(cache, evaluator);
   }
 }
 
@@ -71,6 +73,7 @@ app.post('/internal/push', (req, res) => {
   }
   const { isNew, watermark } = cache.ingest(ruleVersion as ReferenceRuleVersion);
   if (isNew) {
+    persistSiteAgentState(cache, evaluator);
     broadcast({ type: 'WATERMARK', data: { siteId: SITE_ID, watermarkSeq: watermark }, ts: new Date().toISOString() });
     void ackWatermark();
   }
@@ -114,8 +117,6 @@ app.get('/internal/results/:orderId', (req, res) => {
   res.json(results.get(req.params.orderId) ?? []);
 });
 
-app.get('/healthz', (_req, res) => res.json({ ok: true, service: 'site-agent', siteId: SITE_ID }));
-
 app.use(errorHandler(`site-agent ${SITE_ID}`));
 
 const server = app.listen(PORT, () => {
@@ -134,7 +135,7 @@ function connectEpochSubscription(): void {
     try {
       const msg = JSON.parse(String(raw)) as { kind: string; epochSeq?: number };
       if (msg.kind === 'EPOCH_UPDATE' && typeof msg.epochSeq === 'number') {
-        evaluator.setEpoch(msg.epochSeq);
+        if (evaluator.setEpoch(msg.epochSeq)) persistSiteAgentState(cache, evaluator);
       }
     } catch {
       /* ignore malformed */
@@ -158,7 +159,7 @@ setInterval(() => {
       });
       if (res.ok) {
         const { epochSeq } = (await res.json()) as { epochSeq: number };
-        evaluator.setEpoch(epochSeq);
+        if (evaluator.setEpoch(epochSeq)) persistSiteAgentState(cache, evaluator);
       }
     } catch {
       /* coordinator unreachable — keep last known epoch */

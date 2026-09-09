@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 /**
  * File-backed durability for the central service (Phase 7-lite).
@@ -57,6 +57,33 @@ export function persistRefreshEvent(ev) {
 }
 export function loadRefreshEvents() {
     return readLines('refresh.jsonl').map((e) => e);
+}
+function domainSnapshotPath() {
+    return join(DATA_DIR, 'state.json');
+}
+export function loadDomainSnapshot() {
+    const path = domainSnapshotPath();
+    if (!existsSync(path))
+        return null;
+    try {
+        const snapshot = JSON.parse(readFileSync(path, 'utf8'));
+        if (snapshot.version !== 1) {
+            console.error('[central] unsupported domain snapshot version:', snapshot.version);
+            return null;
+        }
+        return snapshot;
+    }
+    catch (err) {
+        console.error('[central] could not load domain snapshot:', err instanceof Error ? err.message : err);
+        return null;
+    }
+}
+export function persistDomainSnapshot(snapshot) {
+    ensureDir();
+    const path = domainSnapshotPath();
+    const temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+    renameSync(temporary, path);
 }
 /** Wipe persisted state (used by tests / fresh-start script). */
 export function resetPersistence() {

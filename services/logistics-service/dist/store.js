@@ -8,6 +8,21 @@ export class ShipmentStore {
     shipments = new Map();
     byOrderCode = new Map();
     seq = 0;
+    snapshot() {
+        return {
+            shipments: [...this.shipments.values()],
+            seq: this.seq,
+        };
+    }
+    restore(snapshot) {
+        this.shipments.clear();
+        this.byOrderCode.clear();
+        this.seq = Math.max(0, snapshot.seq);
+        for (const shipment of snapshot.shipments) {
+            this.shipments.set(shipment.shipmentId, shipment);
+            this.byOrderCode.set(shipment.orderCode, shipment.shipmentId);
+        }
+    }
     create(input) {
         const shipmentId = `shp-${String(++this.seq).padStart(4, '0')}`;
         const now = new Date().toISOString();

@@ -1,4 +1,9 @@
 import type { ReferenceRuleVersion, ReferenceSnapshot } from '@hc/shared';
+export interface SiteCacheSnapshot {
+    version: 1;
+    rules: Record<string, ReferenceRuleVersion[]>;
+    watermark: number;
+}
 /**
  * Local site cache with a short version history per rule — NOT just the
  * latest — so it can reconstruct "the world as of globalSeq N" even after
@@ -9,6 +14,8 @@ export declare class SiteCache {
     private history;
     /** highest globalSeq durably stored locally */
     private watermark;
+    snapshot(): SiteCacheSnapshot;
+    restore(snapshot: SiteCacheSnapshot): void;
     ingest(rec: ReferenceRuleVersion): {
         isNew: boolean;
         watermark: number;

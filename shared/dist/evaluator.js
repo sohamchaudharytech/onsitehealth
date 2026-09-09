@@ -29,12 +29,21 @@ import { DrugInteractionEngine, mostConservative, resultsEqual, } from './engine
 export class EpochGatedEvaluator {
     engine;
     knownEpoch = 0;
+    snapshot() {
+        return { knownEpoch: this.knownEpoch };
+    }
+    restore(snapshot) {
+        this.setEpoch(snapshot.knownEpoch);
+    }
     constructor(engine = new DrugInteractionEngine()) {
         this.engine = engine;
     }
     setEpoch(epochSeq) {
-        if (epochSeq > this.knownEpoch)
+        if (epochSeq > this.knownEpoch) {
             this.knownEpoch = epochSeq;
+            return true;
+        }
+        return false;
     }
     getKnownEpoch() {
         return this.knownEpoch;

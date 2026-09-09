@@ -1,4 +1,9 @@
 import type { GlobalEpoch, SiteWatermark } from '@hc/shared';
+export interface CoordinatorSnapshot {
+    version: 1;
+    watermarks: SiteWatermark[];
+    epoch: GlobalEpoch;
+}
 /**
  * Computes the single global "safe to use" version:
  *   globalActiveEpoch = min(watermark_A, watermark_B, ...)
@@ -9,6 +14,8 @@ export declare class CoordinatorState {
     private watermarks;
     private epoch;
     private onChange;
+    snapshot(): CoordinatorSnapshot;
+    restore(snapshot: CoordinatorSnapshot): void;
     setOnChange(cb: (epoch: GlobalEpoch) => void): void;
     ack(watermark: SiteWatermark): {
         advanced: boolean;

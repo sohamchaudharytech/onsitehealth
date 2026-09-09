@@ -22,6 +22,11 @@ export declare class UserStore {
     private users;
     private byUsername;
     private refreshTokens;
+    snapshot(): {
+        users: UserRecord[];
+        refreshTokens: RefreshRecord[];
+    };
+    restore(snapshot: ReturnType<UserStore['snapshot']>): void;
     constructor(seed: Array<{
         userId: string;
         username: string;

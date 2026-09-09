@@ -1,6 +1,6 @@
 import type { ErrorRequestHandler, NextFunction, Request, RequestHandler, Response } from 'express';
 import { randomUUID } from 'node:crypto';
-import { verifyJwt, type JwtPayload } from './auth.js';
+import { sha256Hex, verifyJwt, type JwtPayload } from './auth.js';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -58,7 +58,7 @@ export function jwtAuth(secret: string): RequestHandler {
 export function internalKeyGuard(internalKey: string): RequestHandler {
   return (req: Request, res: Response, next: NextFunction): void => {
     const provided = req.headers['x-internal-key'];
-    if (typeof provided !== 'string' || provided !== internalKey) {
+    if (typeof provided !== 'string' || sha256Hex(provided) !== sha256Hex(internalKey)) {
       res.status(401).json({ error: 'invalid internal key' });
       return;
     }

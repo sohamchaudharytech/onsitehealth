@@ -25,6 +25,8 @@ export declare class UserStore {
     private users;
     private byUsername;
     private refreshTokens;
+    snapshot(): UserRecord[];
+    restoreUsers(records: UserRecord[]): void;
     constructor(seed: Array<{
         userId: string;
         username: string;
