@@ -290,7 +290,7 @@ contract, randomized network profile, watermark ACKs). Generate 50–500
 from the admin dashboard to stress fan-out, epoch gating, and consistency
 at scale — the acceptance demo passes identically at 250 hospitals.
 
-## Honest caveats (say these if a judge pushes)
+## Honest caveats
 
 - The sites are **logically** distributed (separate processes/containers on one
   host), not multi-region infrastructure.
