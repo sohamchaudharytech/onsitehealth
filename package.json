@@ -5,8 +5,12 @@
   "description": "Distributed Clinical Reference-Data Consistency for Alert Generation",
   "type": "module",
   "scripts": {
+    "start": "./start.sh",
     "typecheck": "tsc -b",
     "build": "tsc -b",
+    "build:all": "npm run build && npm run build -w dashboard && npm --prefix dashboard-logistics run build",
+    "typecheck:all": "npm run typecheck && npm run build -w dashboard && npm --prefix dashboard-logistics run build",
+    "test": "npm run build && node --test tests/*.test.ts",
     "start:central": "node services/central-reference-service/dist/index.js",
     "start:coordinator": "node services/convergence-coordinator/dist/index.js",
     "start:site": "node services/site-agent/dist/index.js",

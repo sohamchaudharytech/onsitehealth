@@ -29,6 +29,19 @@ export class UserStore {
   private byUsername = new Map<string, string>();
   private refreshTokens = new Map<string, RefreshRecord>(); // key = tokenHash
 
+  snapshot(): UserRecord[] {
+    return [...this.users.values()].map((user) => ({ ...user }));
+  }
+
+  restoreUsers(records: UserRecord[]): void {
+    this.users.clear();
+    this.byUsername.clear();
+    for (const record of records) {
+      this.users.set(record.userId, { ...record });
+      this.byUsername.set(record.username, record.userId);
+    }
+  }
+
   constructor(seed: Array<{ userId: string; username: string; password: string; role: Role; hospitalId?: string; fullName?: string }>) {
     for (const u of seed) {
       const rec: UserRecord = {

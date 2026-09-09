@@ -32,6 +32,38 @@ export class CentralStore {
   /** hospital formulary: drug id -> record */
   private drugs = new Map<string, HospitalDrug>();
 
+  snapshot() {
+    return {
+      rules: [...this.bySeq.values()],
+      nextGlobalSeq: this.nextGlobalSeq,
+      sites: [...this.sites.values()],
+      hospitals: [...this.hospitals.values()],
+      nextSimNumber: [...this.nextSimNumber.entries()],
+      drugs: [...this.drugs.values()],
+    };
+  }
+
+  restore(snapshot: ReturnType<CentralStore['snapshot']>): void {
+    this.rules.clear();
+    this.bySeq.clear();
+    this.sites.clear();
+    this.hospitals.clear();
+    this.nextSimNumber.clear();
+    this.drugs.clear();
+
+    for (const rec of snapshot.rules) {
+      const versions = this.rules.get(rec.ruleId) ?? new Map<number, ReferenceRuleVersion>();
+      versions.set(rec.version, rec);
+      this.rules.set(rec.ruleId, versions);
+      this.bySeq.set(rec.globalSeq, rec);
+    }
+    this.nextGlobalSeq = Math.max(1, snapshot.nextGlobalSeq);
+    for (const rec of snapshot.sites) this.registerSite(rec);
+    for (const rec of snapshot.hospitals) this.registerHospital(rec);
+    for (const [key, value] of snapshot.nextSimNumber) this.nextSimNumber.set(key, value);
+    for (const rec of snapshot.drugs) this.addDrugToHospital(rec);
+  }
+
   publish(ruleId: string, payload: Record<string, unknown>, publishedBy?: RulePublisher): ReferenceRuleVersion {
     const versions = this.rules.get(ruleId) ?? new Map<number, ReferenceRuleVersion>();
     const version = versions.size + 1;

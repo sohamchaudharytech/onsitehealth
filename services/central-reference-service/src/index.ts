@@ -29,7 +29,14 @@ import { CentralStore, type SiteRecord } from './store.js';
 import { pushToSite } from './pusher.js';
 import { UserStore } from './users.js';
 import { PatientStore } from './patients.js';
-import { loadLedgerBlocks, persistLedgerBlock, persistRefreshEvent, loadRefreshEvents } from './persistence.js';
+import {
+  loadDomainSnapshot,
+  loadLedgerBlocks,
+  persistDomainSnapshot,
+  persistLedgerBlock,
+  persistRefreshEvent,
+  loadRefreshEvents,
+} from './persistence.js';
 import {
   generateHospitalName,
   generateRegion,
@@ -148,6 +155,38 @@ function stampOrigin(target: Record<string, unknown>, ip: string | null | undefi
 const store = new CentralStore();
 const ledger = new HashChainLedger();
 
+let domainPersistenceEnabled = false;
+let domainPersistenceTimer: NodeJS.Timeout | null = null;
+let domainPersistenceInFlight = false;
+
+function flushDomainSnapshot(): void {
+  if (domainPersistenceInFlight || !domainPersistenceEnabled) return;
+  domainPersistenceInFlight = true;
+  try {
+    persistDomainSnapshot({
+      version: 1,
+      savedAt: new Date().toISOString(),
+      central: store.snapshot(),
+      users: users.snapshot(),
+      patients: patients.snapshot(),
+    });
+  } catch (err) {
+    console.error('[central] domain snapshot persistence failed:', err instanceof Error ? err.message : err);
+  } finally {
+    domainPersistenceInFlight = false;
+  }
+}
+
+function scheduleDomainSnapshot(): void {
+  if (!domainPersistenceEnabled) return;
+  if (domainPersistenceTimer) clearTimeout(domainPersistenceTimer);
+  domainPersistenceTimer = setTimeout(() => {
+    domainPersistenceTimer = null;
+    flushDomainSnapshot();
+  }, 250);
+  domainPersistenceTimer.unref();
+}
+
 // ── Durability: rehydrate the hash-chain ledger from disk, then persist ──────
 // every new block. The chain survives restarts — logs and audit entries stay
 // even when the admin logs out or the service restarts (blockchain-style:
@@ -182,6 +221,7 @@ ledger.append = (eventType, payload) => {
     : payload;
   const block = ledgerAppendRaw(eventType, stampedPayload);
   persistLedgerBlock(block);
+  scheduleDomainSnapshot();
   return block;
 };
 
@@ -278,6 +318,12 @@ const users = new UserStore([
   { userId: 'user-nurse', username: 'nurse@demo.health', password: 'nurse12345', role: 'nurse', hospitalId: 'site-a', fullName: 'Nurse Demo Rivera' },
 ]);
 
+const domainSnapshot = loadDomainSnapshot();
+if (domainSnapshot) {
+  users.restoreUsers(domainSnapshot.users);
+  console.log(`[central] domain users restored from disk: ${domainSnapshot.users.length}`);
+}
+
 // Rehydrate persisted refresh tokens (event-sourced) and persist new ones —
 // users stay logged in across service restarts for up to 180 days.
 users.onRefreshEvent = persistRefreshEvent;
@@ -300,29 +346,35 @@ users.onRefreshEvent = persistRefreshEvent;
 // ── Patient registry (demo seed — one patient so the portal is testable) ─────
 const patients = new PatientStore();
 {
-  const demoData: PatientData = {
-    patientRef: 'P-000123',
-    firstName: 'Ava',
-    lastName: 'Thompson',
-    dob: '1989-04-12',
-    gender: 'female',
-    disease: 'Atrial fibrillation',
-    drugs: ['warfarin', 'aspirin'],
-    interactions: [], // recomputed below once the store is ready
-  };
-  const rec = patients.create(demoData, 'ava.thompson@demo.health', { userId: 'user-admin', username: 'admin', role: 'admin' });
-  // Seed-time recompute so the demo patient reflects any rules published
-  // before this point (none at boot — stays empty until a rule exists).
-  const seedInteractions = patientInteractions(demoData.drugs);
-  if (seedInteractions.length > 0) {
-    patients.applyChange(rec.patientId, { interactions: seedInteractions } as Partial<Record<keyof PatientData, unknown>>, null, 'initial interaction derivation', );
+  if (domainSnapshot) {
+    patients.restore(domainSnapshot.patients);
+    console.log(`[central] domain patients restored from disk: ${domainSnapshot.patients.patients.length}`);
+  } else {
+    const demoData: PatientData = {
+      patientRef: 'P-000123',
+      firstName: 'Ava',
+      lastName: 'Thompson',
+      dob: '1989-04-12',
+      gender: 'female',
+      disease: 'Atrial fibrillation',
+      drugs: ['warfarin', 'aspirin'],
+      interactions: [], // recomputed below once the store is ready
+    };
+    const rec = patients.create(demoData, 'ava.thompson@demo.health', { userId: 'user-admin', username: 'admin', role: 'admin' });
+    // Seed-time recompute so the demo patient reflects any rules published
+    // before this point (none at boot — stays empty until a rule exists).
+    const seedInteractions = patientInteractions(demoData.drugs);
+    if (seedInteractions.length > 0) {
+      patients.applyChange(rec.patientId, { interactions: seedInteractions } as Partial<Record<keyof PatientData, unknown>>, null, 'initial interaction derivation', );
+    }
+    users.create('ava.thompson@demo.health', 'patient12345', 'patient', undefined, undefined, `user-${rec.patientId}`);
+    patients.linkUser(rec.patientId, `user-${rec.patientId}`);
+    patients.addVisit(rec.patientId, 'site-a', 'Initial consultation — atrial fibrillation diagnosis', { userId: 'user-doctor', username: 'doctor', role: 'doctor' });
+    ledger.append('PATIENT_CREATED', { patientId: rec.patientId, patientRef: demoData.patientRef, email: rec.email, createdBy: 'admin' });
+    ledger.append('PATIENT_VISIT_RECORDED', { patientId: rec.patientId, patientRef: demoData.patientRef, hospitalId: 'site-a' });
   }
-  users.create('ava.thompson@demo.health', 'patient12345', 'patient', undefined, undefined, `user-${rec.patientId}`);
-  patients.linkUser(rec.patientId, `user-${rec.patientId}`);
-  patients.addVisit(rec.patientId, 'site-a', 'Initial consultation — atrial fibrillation diagnosis', { userId: 'user-doctor', username: 'doctor', role: 'doctor' });
-  ledger.append('PATIENT_CREATED', { patientId: rec.patientId, patientRef: demoData.patientRef, email: rec.email, createdBy: 'admin' });
-  ledger.append('PATIENT_VISIT_RECORDED', { patientId: rec.patientId, patientRef: demoData.patientRef, hospitalId: 'site-a' });
 }
+
 
 // ── Live event fan-out (dashboard WebSocket clients) ─────────────────────────
 const liveClients = new Set<import('ws').WebSocket>();
@@ -355,24 +407,30 @@ const DEFAULT_PROFILES: Array<{ siteId: string; baseLatencyMs: number; jitterMs:
   { siteId: 'site-b', baseLatencyMs: 120, jitterMs: 40, dropRate: 0 },
   { siteId: 'site-c', baseLatencyMs: 120, jitterMs: 40, dropRate: 0 },
 ];
+const seededHospitalNames = ['Central General Hospital', 'Northside Medical Center', 'Riverside Clinic'];
 for (const [i, p] of DEFAULT_PROFILES.entries()) {
+  const shouldRestore = domainSnapshot && store.getSite(p.siteId)?.host === SITE_HOSTS[i];
+  if (shouldRestore) continue;
   const host = SITE_HOSTS[i] ?? `localhost:${4101 + i}`;
   const [h, port] = host.split(':');
   store.registerSite({ ...p, host: h, port: Number(port) });
+  if (!store.getHospital(p.siteId)) {
+    store.registerHospital({
+      siteId: p.siteId,
+      name: seededHospitalNames[i] ?? p.siteId,
+      region: generateRegion(i),
+      simulated: false,
+      createdAt: new Date().toISOString(),
+    });
+  }
 }
 
-// Default hospitals match the seeded demo sites so the dashboard has real
-// records to show from the start.
-const seededHospitalNames = ['Central General Hospital', 'Northside Medical Center', 'Riverside Clinic'];
-for (const [i, p] of DEFAULT_PROFILES.entries()) {
-  store.registerHospital({
-    siteId: p.siteId,
-    name: seededHospitalNames[i] ?? p.siteId,
-    region: generateRegion(i),
-    simulated: false,
-    createdAt: new Date().toISOString(),
-  });
+if (domainSnapshot) {
+  store.restore(domainSnapshot.central);
+  console.log(`[central] domain rules/sites/hospitals restored from disk: ${domainSnapshot.central.rules.length} rules, ${domainSnapshot.central.sites.length} sites`);
 }
+
+domainPersistenceEnabled = true;
 
 // ── Simulated hospital agents (in-process, for scalability testing) ──────────
 // Each sim hospital gets a real HTTP server inside this process with the
@@ -651,6 +709,7 @@ app.post('/api/sites', (req, res) => {
     port: Number(port),
   };
   store.registerSite(profile);
+  scheduleDomainSnapshot();
   res.status(201).json(profile);
 });
 
@@ -667,6 +726,7 @@ app.patch('/api/sites/:siteId/network', requirePermission('sites:manage'), (req,
   }
   ledger.append('SITE_CHAOS_INJECTED', { siteId: updated.siteId, ...clean });
   broadcast({ type: 'CHAOS', data: { siteId: updated.siteId, ...clean }, ts: new Date().toISOString() });
+  scheduleDomainSnapshot();
   res.json(updated);
 });
 
@@ -726,6 +786,7 @@ app.post('/api/hospitals', requirePermission('hospitals:manage'), async (req, re
   store.registerHospital(hospital);
   const sim = await hostSimulatedHospital(id);
   store.registerSite({ ...profile, port: sim.port });
+  scheduleDomainSnapshot();
   ledger.append('HOSPITAL_ADDED', { siteId: id, name: hospital.name, region: hospital.region });
   broadcast({ type: 'HOSPITAL', data: { action: 'added', ...hospital }, ts: new Date().toISOString() });
   await replayHistoryToSite(store.getSite(id)!);
@@ -751,6 +812,7 @@ app.delete('/api/hospitals/:siteId', requirePermission('hospitals:manage'), asyn
   }).catch(() => undefined);
   ledger.append('HOSPITAL_REMOVED', { siteId, name: hospital?.name ?? siteId, hadSite: !!removed });
   broadcast({ type: 'HOSPITAL', data: { action: 'removed', siteId }, ts: new Date().toISOString() });
+  scheduleDomainSnapshot();
   res.json({ ok: true, siteId });
 });
 
@@ -795,6 +857,7 @@ app.post('/api/hospitals/simulated', requirePermission('hospitals:manage'), asyn
   const elapsedMs = Date.now() - t0;
   ledger.append('SIM_HOSPITALS_GENERATED', { count, siteIds, replayMs: elapsedMs });
   broadcast({ type: 'HOSPITAL', data: { action: 'simulated-batch', count, siteIds }, ts: new Date().toISOString() });
+  scheduleDomainSnapshot();
   res.status(201).json({ count, created, replayMs: elapsedMs });
 });
 
@@ -829,6 +892,7 @@ app.post('/api/doctors', requirePermission('users:manage'), (req, res) => {
     return;
   }
   const user = users.create(username.trim(), password, 'doctor', hospitalId.trim(), typeof fullName === 'string' && fullName.trim() ? fullName.trim() : undefined);
+  scheduleDomainSnapshot();
   ledger.append('DOCTOR_ADDED', { userId: user.userId, username: user.username, hospitalId: user.hospitalId, fullName: user.fullName });
   broadcast({ type: 'DOCTOR', data: { action: 'added', userId: user.userId, username: user.username, hospitalId: user.hospitalId }, ts: new Date().toISOString() });
   res.status(201).json({ userId: user.userId, username: user.username, role: user.role, hospitalId: user.hospitalId, fullName: user.fullName });
@@ -841,6 +905,7 @@ app.delete('/api/doctors/:userId', requirePermission('users:manage'), (req, res)
     return;
   }
   const removed = users.deleteUser(req.params.userId)!;
+  scheduleDomainSnapshot();
   ledger.append('USER_REMOVED', { userId: removed.userId, username: removed.username, role: removed.role });
   broadcast({ type: 'DOCTOR', data: { action: 'removed', userId: removed.userId, username: removed.username }, ts: new Date().toISOString() });
   res.json({ ok: true, ...removed });
@@ -870,10 +935,12 @@ app.post('/api/doctors/simulated', requirePermission('users:manage'), (req, res)
     if (users.usernameTaken(username)) continue;
     const password = generateDoctorPassword();
     const user = users.create(username, password, 'doctor', hospital.siteId, fullName);
+    scheduleDomainSnapshot();
     created.push({ userId: user.userId, username, fullName, hospitalId: hospital.siteId, password });
   }
   ledger.append('DOCTOR_ADDED', { batch: true, count: created.length });
   broadcast({ type: 'DOCTOR', data: { action: 'simulated-batch', count: created.length }, ts: new Date().toISOString() });
+  scheduleDomainSnapshot();
   res.status(201).json({ count: created.length, created });
 });
 
@@ -935,6 +1002,7 @@ app.post('/api/hospitals/:siteId/drugs', requirePermission('formulary:manage'), 
     addedAt: new Date().toISOString(),
   };
   store.addDrugToHospital(drug);
+  scheduleDomainSnapshot();
   ledger.append('DRUG_ADDED_TO_HOSPITAL', { drugId: drug.id, drugName: name, hospitalId: siteId, addedBy: drug.addedBy });
   broadcast({ type: 'DRUG', data: { action: 'added', drugName: name, hospitalId: siteId, addedBy: drug.addedBy?.username }, ts: new Date().toISOString() });
   res.status(201).json(drug);
@@ -987,6 +1055,7 @@ app.delete('/api/hospitals/:siteId/drugs/:drugId', requirePermission('formulary:
     return;
   }
   store.removeDrug(drug.id);
+  scheduleDomainSnapshot();
   ledger.append('DRUG_REMOVED_FROM_HOSPITAL', { drugId: drug.id, drugName: drug.drugName, hospitalId: drug.hospitalId });
   broadcast({ type: 'DRUG', data: { action: 'removed', drugName: drug.drugName, hospitalId: drug.hospitalId }, ts: new Date().toISOString() });
   res.json({ ok: true });
@@ -1090,6 +1159,7 @@ app.post('/api/patients', requirePermission('patients:manage'), (req, res) => {
   const rec = patients.create(data, mail, creator);
   const portalUser = users.create(mail, password, 'patient', undefined, undefined, `user-${rec.patientId}`);
   patients.linkUser(rec.patientId, portalUser.userId);
+  scheduleDomainSnapshot();
   ledger.append('PATIENT_CREATED', { patientId: rec.patientId, patientRef: ref, email: mail, createdBy: creator?.username ?? 'unknown', data });
   broadcast({ type: 'PATIENT', data: { action: 'created', patientRef: ref, name: `${data.firstName} ${data.lastName}` }, ts: new Date().toISOString() });
   res.status(201).json({ ...patientView(rec, new Map(store.listHospitals().map((h) => [h.siteId, h.name]))), password });
@@ -1195,6 +1265,7 @@ app.patch('/api/patients/:patientId', requirePermission('patients:manage'), (req
   }
   const hospitals = new Map(store.listHospitals().map((h) => [h.siteId, h.name]));
   const updated = patients.get(rec.patientId)!;
+  scheduleDomainSnapshot();
   res.json({
     ...patientView(updated, hospitals),
     history: patients.historyOf(rec.patientId),
@@ -1221,6 +1292,7 @@ app.post('/api/patients/:patientId/visits', requirePermission('patients:manage')
   }
   ledger.append('PATIENT_VISIT_RECORDED', { patientId: rec.patientId, patientRef: rec.data.patientRef, hospitalId, visitId: visit.visitId, reason: visit.reason });
   broadcast({ type: 'PATIENT', data: { action: 'visit', patientRef: rec.data.patientRef, hospitalId }, ts: new Date().toISOString() });
+  scheduleDomainSnapshot();
   res.status(201).json({ ...visit, hospitalName: store.getHospital(hospitalId)?.name ?? hospitalId });
 });
 
@@ -1243,6 +1315,7 @@ app.post('/api/patients/:patientId/deactivate', requirePermission('patients:mana
     users.revokeAllForUser(portal.userId);
   }
   ledger.append('PATIENT_UPDATED', { patientId: rec.patientId, patientRef: rec.data.patientRef, changedBy: editor?.username, reason: 'deactivated', changes: { status: { before: 'active', after: 'deactivated' } } });
+  scheduleDomainSnapshot();
   res.json({ ok: true, status: 'deactivated' });
 });
 
@@ -1260,6 +1333,7 @@ app.post('/api/patients/:patientId/reactivate', requirePermission('patients:mana
     return;
   }
   ledger.append('PATIENT_UPDATED', { patientId: rec.patientId, patientRef: rec.data.patientRef, changedBy: editor?.username, reason: 'reactivated', changes: { status: { before: 'deactivated', after: 'active' } } });
+  scheduleDomainSnapshot();
   res.json({ ok: true, status: 'active' });
 });
 
@@ -1302,6 +1376,7 @@ app.post('/api/nurses', requirePermission('nurses:manage'), (req, res) => {
   );
   ledger.append('NURSE_ADDED', { userId: user.userId, email: mail, hospitalId: user.hospitalId, fullName: user.fullName, createdBy: req.user!.username });
   broadcast({ type: 'DOCTOR', data: { action: 'nurse-added', email: mail }, ts: new Date().toISOString() });
+  scheduleDomainSnapshot();
   res.status(201).json({ userId: user.userId, email: user.username, fullName: user.fullName, hospitalId: user.hospitalId });
 });
 
@@ -1313,6 +1388,7 @@ app.delete('/api/nurses/:userId', requirePermission('nurses:manage'), (req, res)
   }
   const removed = users.deleteUser(req.params.userId)!;
   ledger.append('USER_REMOVED', { userId: removed.userId, username: removed.username, role: removed.role });
+  scheduleDomainSnapshot();
   res.json({ ok: true, ...removed });
 });
 
@@ -1396,6 +1472,7 @@ app.post('/api/users', requirePermission('users:manage'), (req, res) => {
     return;
   }
   const user = users.create(username.trim(), password, role);
+  scheduleDomainSnapshot();
   res.status(201).json({ userId: user.userId, username: user.username, role: user.role });
 });
 
@@ -1512,6 +1589,7 @@ const server = app.listen(PORT, () => {
 
 // Tear down simulated hospital agents on shutdown.
 const shutdown = () => {
+  flushDomainSnapshot();
   for (const sim of simSites.values()) sim.handle.close();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 2000).unref();

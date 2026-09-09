@@ -1,6 +1,9 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AuditBlock } from '@hc/shared';
+import type { CentralStore } from './store.js';
+import type { PatientStore } from './patients.js';
+import type { UserStore } from './users.js';
 
 /**
  * File-backed durability for the central service (Phase 7-lite).
@@ -69,6 +72,42 @@ export function persistRefreshEvent(ev: RefreshEvent): void {
 
 export function loadRefreshEvents(): RefreshEvent[] {
   return readLines('refresh.jsonl').map((e) => e as unknown as RefreshEvent);
+}
+
+export interface DomainStateSnapshot {
+  version: 1;
+  savedAt: string;
+  central: ReturnType<CentralStore['snapshot']>;
+  users: ReturnType<UserStore['snapshot']>;
+  patients: ReturnType<PatientStore['snapshot']>;
+}
+
+function domainSnapshotPath(): string {
+  return join(DATA_DIR, 'state.json');
+}
+
+export function loadDomainSnapshot(): DomainStateSnapshot | null {
+  const path = domainSnapshotPath();
+  if (!existsSync(path)) return null;
+  try {
+    const snapshot = JSON.parse(readFileSync(path, 'utf8')) as DomainStateSnapshot;
+    if (snapshot.version !== 1) {
+      console.error('[central] unsupported domain snapshot version:', snapshot.version);
+      return null;
+    }
+    return snapshot;
+  } catch (err) {
+    console.error('[central] could not load domain snapshot:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+export function persistDomainSnapshot(snapshot: DomainStateSnapshot): void {
+  ensureDir();
+  const path = domainSnapshotPath();
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+  renameSync(temporary, path);
 }
 
 /** Wipe persisted state (used by tests / fresh-start script). */

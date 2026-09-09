@@ -19,6 +19,37 @@ export class PatientStore {
   private nextChangeSeq = 1;
   private nextRefNum = 1;
 
+  snapshot() {
+    return {
+      patients: [...this.patients.values()].map((patient) => ({ ...patient })),
+      history: [...this.history.entries()].map(([patientId, blocks]) => ({ patientId, blocks })),
+      visits: [...this.visits.entries()].map(([patientId, visits]) => ({ patientId, visits })),
+      nextChangeSeq: this.nextChangeSeq,
+      nextRefNum: this.nextRefNum,
+    };
+  }
+
+  restore(snapshot: ReturnType<PatientStore['snapshot']>): void {
+    this.patients.clear();
+    this.byRef.clear();
+    this.history.clear();
+    this.visits.clear();
+
+    for (const patient of snapshot.patients) {
+      const record = { ...patient };
+      this.patients.set(record.patientId, record);
+      this.byRef.set(record.data.patientRef, record.patientId);
+    }
+    for (const entry of snapshot.history) {
+      if (this.patients.has(entry.patientId)) this.history.set(entry.patientId, [...entry.blocks]);
+    }
+    for (const entry of snapshot.visits) {
+      if (this.patients.has(entry.patientId)) this.visits.set(entry.patientId, [...entry.visits]);
+    }
+    this.nextChangeSeq = Math.max(1, snapshot.nextChangeSeq);
+    this.nextRefNum = Math.max(1, snapshot.nextRefNum);
+  }
+
   /** Allocate the next human-readable id: P-000123 style, zero-padded to 6. */
   allocatePatientRef(): string {
     let n = this.nextRefNum++;

@@ -33,12 +33,16 @@ make propagation instantaneous, we **decouple *receiving* data from
 which doesn't, still evaluate against the identical snapshot — because neither
 uses its own local freshness to decide; both use the one shared epoch value.
 
-## Quick start (local, no Docker)
+## Quick start (one command, no Docker)
 
 ```bash
-npm install
-node scripts/start-all.mjs        # + redis :6379, central :4001, coordinator :4002, sites :4101-4103
+./start.sh
+# or: npm start
 ```
+
+`start.sh` automatically checks dependencies, frees any conflicting ports, starts Redis (:6379), launches the Convergence Coordinator (:4002), Central Reference Service (:4001), Logistics Service (:4301), all 3 Site Agents (:4101-:4103), the Clinical Dashboard (:5173), and the Logistics Dashboard (:5174), applies the initial seed, and waits for health checks before displaying the live dashboard URLs.
+
+Press `Ctrl+C` in that terminal to cleanly shut down all services.
 
 `start-all` first ensures Redis is up: if no server answers on :6379 it
 compiles one from source into `.redis/` (one-time; needs only curl, tar,
@@ -51,6 +55,7 @@ In another terminal:
 
 ```bash
 npm run demo                      # headless §12 acceptance test
+npm run seed                      # optional: only publishes the V1 demo rule if absent
 ```
 
 Or with the live dashboard:
@@ -59,7 +64,8 @@ Or with the live dashboard:
 cd dashboard && npm install && npm run dev   # http://localhost:5173
 ```
 
-With Docker Compose (one container per service — logically distributed):
+With Docker Compose (central/coordinator/sites/dashboard plus independent
+logistics — logically distributed):
 
 ```bash
 docker compose up --build
@@ -292,8 +298,11 @@ at scale — the acceptance demo passes identically at 250 hospitals.
   structure inside a blockchain, without decentralized consensus. That's the
   correct tool for tamper-evidence here; calling it "a blockchain" would be
   the overclaim.
-- Storage is in-memory in this phase (MongoDB persistence is a later phase per
-  the PRD's build plan); the consistency mechanism is unaffected.
+- Central rules, sites, hospitals, formularies, users, and patients now restore
+  from an atomic JSON snapshot in `.data/state.json`; the ledger and refresh events
+  use append-only JSONL. Site/coordinator caches and logistics remain in-memory,
+  so a full stack restart still requires rule replay/ACKs for site convergence.
+  MongoDB persistence remains a later production phase.
 - The **rate limiter is Redis-backed** (`shared/src/redislimit.ts`): an
   atomic Lua sliding-window over sorted sets, shared across ALL service
   instances — two instances behind one limit, not one limit each. Redis

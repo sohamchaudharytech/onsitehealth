@@ -4,9 +4,12 @@ services:
   mongo:
     image: mongo:7
     ports: ["27017:27017"]
+    volumes: ["mongo-data:/data/db"]
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     ports: ["6379:6379"]
+    volumes: ["redis-data:/data"]
 
   central:
     build:
@@ -18,7 +21,9 @@ services:
       SITE_HOSTS: "site-a:4101,site-b:4102,site-c:4103"
       COORDINATOR_URL: "http://coordinator:4002"
       REDIS_URL: "redis://redis:6379"
+      DATA_DIR: "/app/.data"
     ports: ["4001:4001"]
+    volumes: ["./.data:/app/.data"]
     depends_on: [coordinator, redis]
 
   coordinator:
@@ -73,3 +78,25 @@ services:
       dockerfile: ../Dockerfile.dashboard
     ports: ["5173:5173"]
     depends_on: [central, coordinator]
+
+  logistics:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    command: ["npx", "tsx", "services/logistics-service/src/index.ts"]
+    environment:
+      PORT: "4301"
+      REDIS_URL: "redis://redis:6379"
+    ports: ["4301:4301"]
+    depends_on: [redis]
+
+  logistics-dashboard:
+    build:
+      context: ./dashboard-logistics
+      dockerfile: ../Dockerfile.logistics-dashboard
+    ports: ["5174:5174"]
+    depends_on: [logistics]
+
+volumes:
+  mongo-data:
+  redis-data:
